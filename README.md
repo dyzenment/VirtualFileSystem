@@ -3,6 +3,7 @@
 A stream-first, mount-based virtual filesystem for .NET - **one path tree over
 every storage backend you use.**
 
+[![ci](https://github.com/dyzenment/VirtualFileSystem/actions/workflows/ci.yml/badge.svg)](https://github.com/dyzenment/VirtualFileSystem/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/Dytools.VirtualFileSystem.svg)](https://www.nuget.org/packages/Dytools.VirtualFileSystem/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 

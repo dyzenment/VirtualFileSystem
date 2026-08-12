@@ -19,10 +19,10 @@ public sealed class PathRewriteMiddleware(Func<VfsPath, VfsPath> rewrite) : IVfs
         return next(ctx, ct);
     }
 
-    // Delete, Copy, Move, Exists, GetInfo, List - inherit default pass-through.
-    // AddRewriter() is primarily for path normalisation and prefix substitution,
+    // Delete, Copy, Move, Exists, GetInfo, List - inherit the default pass-through.
+    // AddRewriter() is primarily for path normalization and prefix substitution,
     // which applies most relevantly to read/write. Override the other operations
-    // in a custom middleware if you need rewriting on all operations.
+    // in custom middleware if you need rewriting on all operations.
 
     private void Apply(VfsContext ctx)
     {
