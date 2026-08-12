@@ -1,51 +1,77 @@
+using Microsoft.Extensions.DependencyInjection;
+
 namespace Dytools.VirtualFileSystem.Internal;
 
-// Mount and alias tables are stored as immutable sorted arrays replaced atomically
-// on every write (Interlocked / volatile swap inside _writeLock).
-//
-// Read path (Resolve - called on every VFS operation):
-//   • volatile array read  - one memory-barrier instruction, no lock
-//   • struct array enumerator - zero heap allocation
-//   • early break on first match (array is sorted descending by key length,
-//     so the first prefix hit is always the longest-prefix match)
-//
-// Write path (Mount / Unmount / Alias - startup-time or rare dynamic use):
-//   • serialised by _writeLock so concurrent writers don't race
-//   • builds a new array from scratch, then assigns via volatile write
-//   • allocates freely - correctness and simplicity matter more than speed here
+// How a mount produces its node: a fixed instance (runtime vfs.Mount), or a keyed DI
+// service (builder mounts) whose lifetime - singleton / scoped / transient - the DI
+// container owns. Keyed resolution happens against the caller's ambient scope, so a
+// scoped-mounted node comes from the request scope.
+internal readonly struct MountEntry
+{
+    private readonly IVfsNode? _instance;
+    private readonly string?   _diKey;
+
+    private MountEntry(IVfsNode? instance, string? diKey)
+    {
+        _instance = instance;
+        _diKey    = diKey;
+    }
+
+    public static MountEntry ForInstance(IVfsNode node) => new(node, null);
+    public static MountEntry ForKey(string diKey)       => new(null, diKey);
+
+    public IVfsNode Resolve(IServiceProvider? provider)
+    {
+        if (_instance is not null) return _instance;
+        if (provider is null)
+            throw new InvalidOperationException(
+                "This mount resolves its node from DI, but no service provider is available. " +
+                "Resolve IVirtualFileSystem from a DI scope so the node can be built.");
+        return provider.GetRequiredKeyedService<IVfsNode>(_diKey);
+    }
+}
+
+// Mount and alias tables are immutable sorted arrays swapped atomically on write.
+// Resolve is lock-free: volatile reads + struct enumerators, zero heap allocation on
+// the common path. Mounts are sorted descending by key length so the first prefix hit
+// is the longest match.
 internal sealed class VfsMountRegistry : IVfsMountRegistry
 {
-    private readonly IVfsMountRegistry? _parent;
+    private readonly IVfsMountRegistry? _parent;    // set on per-instance child registries
+    private readonly IServiceProvider?  _provider;  // root's fallback provider for keyed resolution
 
-    /// <summary>Creates a root registry with no parent (global singleton).</summary>
-    public VfsMountRegistry() { }
+    // Root registry (global singleton): keyed mounts resolve against this provider when
+    // no ambient scope is supplied.
+    public VfsMountRegistry(IServiceProvider provider) => _provider = provider;
 
-    // Internal ctor - takes IVfsMountRegistry directly but is not discoverable by DI
-    // (DI would see the IVfsMountRegistry parameter and cause a circular dependency).
+    // Per-instance child registry: instance mounts added via IVirtualFileSystem.Mount,
+    // falling back to the shared root for everything else.
     internal VfsMountRegistry(IVfsMountRegistry parent) => _parent = parent;
 
-    // Immutable snapshots. volatile ensures every read sees the latest write
-    // without a lock. The array contents are never mutated after assignment.
-    // Mounts: sorted descending by key length - first prefix match = longest match.
-    private volatile (VfsPath Key, IVfsNode Node)[]    _mounts  = [];
+    private volatile (VfsPath Key, MountEntry Entry)[] _mounts  = [];
     private volatile (VfsPath Alias, VfsPath Target)[] _aliases = [];
-
-    // Serialises concurrent writers. Readers never acquire this lock.
     private readonly object _writeLock = new();
 
     // -- IVfsMountRegistry -----------------------------------------------------
 
+    // Runtime instance mount (IVirtualFileSystem.Mount / direct registry use).
     public void Mount(string mountPoint, IVfsNode node)
+        => AddMount(mountPoint, MountEntry.ForInstance(node));
+
+    // Keyed DI mount, driven by the builder at startup. Not on the public interface.
+    internal void MountKeyed(string mountPoint)
+        => AddMount(mountPoint, MountEntry.ForKey(mountPoint));
+
+    private void AddMount(string mountPoint, MountEntry entry)
     {
         var key = VfsPath.From(mountPoint);
         lock (_writeLock)
         {
             var cur  = _mounts;
-            var next = new List<(VfsPath Key, IVfsNode Node)>(cur.Length + 1);
+            var next = new List<(VfsPath Key, MountEntry Entry)>(cur.Length + 1);
             foreach (var e in cur)
                 if (e.Key != key) next.Add(e);
-            next.Add((key, node));
-            // Longest prefix must win → sort descending so we can break on first match.
+            next.Add((key, entry));
             next.Sort(static (a, b) => b.Key.Length.CompareTo(a.Key.Length));
             _mounts = next.ToArray();
         }
@@ -57,10 +83,9 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
         lock (_writeLock)
         {
             var cur  = _mounts;
-            var next = new List<(VfsPath Key, IVfsNode Node)>(cur.Length);
+            var next = new List<(VfsPath Key, MountEntry Entry)>(cur.Length);
             foreach (var e in cur)
                 if (e.Key != key) next.Add(e);
-            // Removing an element from a sorted array keeps it sorted - no re-sort needed.
             _mounts = next.ToArray();
         }
     }
@@ -95,37 +120,32 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
 
     // -- Resolve ---------------------------------------------------------------
 
-    // Lock-free hot path. Volatile reads + struct enumerators = zero heap allocation
-    // for the common case (no alias, clean absolute path).
-    public (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(VfsPath path)
+    public (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(
+        VfsPath path, IServiceProvider? serviceProvider = null)
     {
-        var aliasSnap = _aliases;               // one volatile read, captured for the call
+        var aliasSnap = _aliases;
         var expanded  = ExpandAliases(path, aliasSnap, depth: 0);
         var isAliased = expanded is not null;
         var effective = isAliased ? expanded!.Value : path;
 
-        // Struct enumerator - zero alloc. Sorted descending: break on first valid match.
-        var mountSnap = _mounts;                // one volatile read
-        VfsPath   matchKey  = default;
-        IVfsNode? matchNode = null;
+        var mountSnap = _mounts;
+        VfsPath      matchKey   = default;
+        MountEntry?  matchEntry = null;
 
-        foreach (var (key, node) in mountSnap)
+        foreach (var (key, entry) in mountSnap)
         {
             if (!effective.StartsWith(key)) continue;
-            matchKey  = key;
-            matchNode = node;
-            break; // first match IS the longest - done
+            matchKey   = key;
+            matchEntry = entry;
+            break;
         }
 
-        if (matchNode is null)
+        if (matchEntry is null)
         {
-            if (_parent is not null) return _parent.Resolve(path);
+            if (_parent is not null) return _parent.Resolve(path, serviceProvider);
             throw new DirectoryNotFoundException($"No VFS mount found for path: {path}");
         }
 
-        // Build the resolved VfsPath.
-        // Non-aliased fast path: original VfsPath is already the resolved path - zero alloc.
-        // Aliased: stream/query spans from the original path must be grafted onto the expanded base.
         VfsPath resolvedPath;
         if (!isAliased)
         {
@@ -142,7 +162,6 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
             }
             else
             {
-                // Rare: alias + stream/query - assemble full path in a stack buffer.
                 var baseSpan = effective.PathSpan;
                 Span<char> buf = stackalloc char[VfsPath.MaxLength];
                 baseSpan.CopyTo(buf);
@@ -153,14 +172,12 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
             }
         }
 
-        return (matchNode, matchKey, resolvedPath);
+        var node = matchEntry.Value.Resolve(serviceProvider ?? _provider);
+        return (node, matchKey, resolvedPath);
     }
 
     // -- Alias expansion -------------------------------------------------------
 
-    // Returns null when no alias matched (zero allocation - the common case).
-    // Receives the alias snapshot captured at the start of Resolve so a concurrent
-    // Alias() call mid-resolution sees a consistent view.
     private static VfsPath? ExpandAliases(
         VfsPath path,
         (VfsPath Alias, VfsPath Target)[] aliases,

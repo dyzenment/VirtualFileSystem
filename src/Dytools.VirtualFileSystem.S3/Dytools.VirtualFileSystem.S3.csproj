@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dytools.VirtualFileSystem.Nodes.S3</RootNamespace>
+    <AssemblyName>Dytools.VirtualFileSystem.S3</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet package metadata -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Dytools.VirtualFileSystem.S3</PackageId>
+    <Title>Dytools Virtual File System - Amazon S3 provider</Title>
+    <Description>Amazon S3 storage node for Dytools.VirtualFileSystem. Mount an S3 bucket under a VFS path and read, write, list, copy, and delete objects through the unified virtual filesystem API. Uses AWSSDK.S3.</Description>
+    <PackageTags>vfs;virtual-filesystem;s3;aws;amazon-s3;storage;streams</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dytools.VirtualFileSystem\Dytools.VirtualFileSystem.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.102.1" />
+  </ItemGroup>
+
+</Project>

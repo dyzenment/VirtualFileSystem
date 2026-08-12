@@ -20,8 +20,25 @@ public static class ServiceCollectionExtensions
         var opts = new VfsOptions();
 
         services.AddSingleton(opts);
-        services.AddSingleton<IVfsMountRegistry, VfsMountRegistry>();
-        services.AddSingleton<IVfsAliasStore,    InMemoryAliasStore>();
+        services.AddSingleton<IVfsAliasStore, InMemoryAliasStore>();
+
+        // The registry populates itself from the accumulated options the first time it's
+        // resolved (which happens automatically when anything first uses the VFS). Startup
+        // aliases and instance/singleton mounts are applied here; scoped/transient mounts
+        // are stored as resolvers and built per operation. No manual init step required.
+        services.AddSingleton<IVfsMountRegistry>(sp =>
+        {
+            var registry = new VfsMountRegistry(sp);   // root; keyed nodes fall back to this provider
+            var o = sp.GetRequiredService<VfsOptions>();
+
+            foreach (var (alias, target) in o.Aliases)
+                registry.Alias(alias, target);
+
+            foreach (var path in o.MountPaths)          // each mount is a keyed IVfsNode service; DI owns the lifetime
+                registry.MountKeyed(path);
+
+            return registry;
+        });
 
         // Pipeline is a singleton - built once from the accumulated options.
         services.AddSingleton(sp =>
@@ -31,27 +48,23 @@ public static class ServiceCollectionExtensions
             return new VfsPipeline(mw);
         });
 
-        // IVirtualFileSystem is transient - each consumer gets a fresh instance
-        // with its own instance-mount list. Shares the singleton registry + pipeline.
+        // IVirtualFileSystem is transient - each consumer gets a fresh instance with its
+        // own instance-mount list. Shares the singleton registry + pipeline. `sp` is the
+        // scope this vfs is resolved from (the web request scope, in a request); it's
+        // captured so scoped/transient-mounted nodes resolve against that same scope.
         services.AddTransient<IVirtualFileSystem>(sp =>
             new DefaultVirtualFileSystem(
                 sp.GetRequiredService<IVfsMountRegistry>(),
-                sp.GetRequiredService<VfsPipeline>()));
+                sp.GetRequiredService<VfsPipeline>(),
+                ambient: sp));
 
         return new VfsBuilder(services, opts);
     }
 
-    // For non-ASP.NET projects (console, WinForms, background services):
-    //   host.Services.InitializeVirtualFileSystem();
+    // Optional. The registry self-populates from the options on first use, so this is
+    // no longer required. Call it at startup if you'd rather build the mounts (and
+    // surface any mount-factory errors) eagerly instead of on the first VFS operation:
+    //   app.Services.InitializeVirtualFileSystem();   // forces the registry to build now
     public static void InitializeVirtualFileSystem(this IServiceProvider services)
-    {
-        var registry = services.GetRequiredService<IVfsMountRegistry>();
-        var opts     = services.GetRequiredService<VfsOptions>();
-
-        foreach (var (alias, target) in opts.Aliases)
-            registry.Alias(alias, target);
-
-        foreach (var (path, factory) in opts.Mounts)
-            registry.Mount(path, factory(services));
-    }
+        => services.GetRequiredService<IVfsMountRegistry>();
 }

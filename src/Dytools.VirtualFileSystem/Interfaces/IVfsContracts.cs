@@ -13,7 +13,10 @@ public interface IVfsMountRegistry
     void      RemoveAlias(string alias);
 
     // Returns the node, the matched mount-point key, and the fully-resolved VfsPath (post-alias).
-    (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(VfsPath path);
+    // serviceProvider is the caller's ambient scope, used to build scoped/transient-mounted
+    // nodes; pass null (or omit) for instance and singleton mounts.
+    (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(
+        VfsPath path, IServiceProvider? serviceProvider = null);
 }
 
 // -- Alias store ---------------------------------------------------------------
@@ -31,8 +34,18 @@ public interface IVfsAliasStore
 // -- Builder -------------------------------------------------------------------
 public interface IVfsBuilder
 {
-    IVfsBuilder Mount(string path, Func<IServiceProvider, IVfsNode> factory);
+    // A pre-built node - one instance for the app (singleton).
     IVfsBuilder Mount(string path, IVfsNode node);
+
+    // A factory. Compose by nesting (new DedupeNode(new LocalFsNode(...), ...)) and
+    // reference other mounts with sp.NodeAt("/other"). The lifetime decides how often the
+    // factory runs and against which scope - Singleton (once, from the root), Scoped (once
+    // per DI scope; in a web request the request scope, so the node shares its services),
+    // or Transient (per operation). Scoped/Transient require IVirtualFileSystem to be
+    // resolved from a DI scope.
+    IVfsBuilder Mount(string path, Func<IServiceProvider, IVfsNode> factory,
+                      MountLifetime lifetime = MountLifetime.Transient);
+
     IVfsBuilder Use<TMiddleware>() where TMiddleware : class, IVfsMiddleware;
     IVfsBuilder Use(IVfsMiddleware middleware);
     IVfsBuilder AddRewriter(Func<VfsPath, VfsPath> rewrite);  // shorthand for PathRewriteMiddleware

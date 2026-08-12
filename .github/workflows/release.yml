@@ -3,7 +3,7 @@ name: release
 # Publishes every packable project to NuGet when you push a version tag, e.g.:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Auth uses NuGet Trusted Publishing (OIDC) — no long-lived API key secret.
+# Auth uses NuGet Trusted Publishing (OIDC) - no long-lived API key secret.
 # One-time setup on nuget.org (Account → Trusted Publishing → Add):
 #   Repository owner : dyzenment
 #   Repository       : VirtualFileSystem

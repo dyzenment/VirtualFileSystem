@@ -1,0 +1,264 @@
+using System.Collections.Immutable;
+using System.Net;
+using System.Runtime.CompilerServices;
+using Amazon.S3;
+using Amazon.S3.Model;
+using Amazon.S3.Transfer;
+using Dytools.VirtualFileSystem;
+
+namespace Dytools.VirtualFileSystem.Nodes.S3;
+
+// Mounts an Amazon S3 bucket (optionally rooted at a key prefix) as a VFS path.
+//
+// The node wraps a caller-supplied IAmazonS3 client. AWS SDK clients are thread-safe
+// and intended to live for the lifetime of the application, so a single client shared
+// across the app (registered as a singleton) is the recommended usage.
+//
+// Path mapping: the mount-relative VFS path becomes the S3 object key, optionally
+// prefixed. S3 is a flat key space with '/' separators, so "folders" are virtual -
+// ListAsync uses a '/' delimiter to surface them as directories.
+//
+// Native CopyAsync uses S3 CopyObject (server-side, no bytes through the client).
+// Append is not supported - S3 objects are immutable and must be rewritten whole.
+//
+// Usage:
+//   .Mount("/archive", sp => new S3Node(sp.GetRequiredService<IAmazonS3>(), "my-bucket"))
+//   .MountS3("/archive", "my-bucket")                 // convenience extension
+//   .MountS3("/reports", "my-bucket", "reports/2026") // rooted at a key prefix
+public sealed class S3Node : VfsNodeBase
+{
+    private readonly IAmazonS3 _s3;
+    private readonly string    _bucket;
+    private readonly string    _prefix;   // normalized: no leading/trailing '/', "" when none
+
+    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null)
+    {
+        _s3     = client ?? throw new ArgumentNullException(nameof(client));
+        _bucket = string.IsNullOrWhiteSpace(bucketName)
+            ? throw new ArgumentException("Bucket name is required.", nameof(bucketName))
+            : bucketName;
+        _prefix = keyPrefix?.Trim('/') ?? "";
+    }
+
+    public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
+    {
+        try
+        {
+            var resp = await _s3.GetObjectAsync(
+                new GetObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
+            return resp.ResponseStream;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public override async Task<Stream> OpenWriteAsync(
+        VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+    {
+        if (mode == VfsWriteMode.Append)
+            throw new NotSupportedException(
+                "Amazon S3 objects are immutable and cannot be appended to. Rewrite the whole object instead.");
+
+        var key = KeyFor(Rel(request));
+        if (mode == VfsWriteMode.CreateNew && await ObjectExistsAsync(key, ct))
+            throw new IOException($"S3 object already exists: s3://{_bucket}/{key}");
+
+        return new S3CommitStream(_s3, _bucket, key);
+    }
+
+    public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+        => _s3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
+
+    // Native server-side copy. Base MoveAsync/RenameAsync reuse this (copy + delete).
+    public override Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
+        => _s3.CopyObjectAsync(new CopyObjectRequest
+        {
+            SourceBucket      = _bucket, SourceKey      = KeyFor(Rel(src)),
+            DestinationBucket = _bucket, DestinationKey = KeyFor(Rel(dst)),
+        }, ct);
+
+    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+        VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var listPrefix = ListPrefixFor(Rel(request));
+        string? token = null;
+        do
+        {
+            var resp = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = _bucket, Prefix = listPrefix, Delimiter = "/", ContinuationToken = token,
+            }, ct);
+
+            foreach (var commonPrefix in resp.CommonPrefixes ?? [])
+                yield return new VfsNodeInfo
+                {
+                    RelativePath = VfsPath.From(StripPrefix(commonPrefix.TrimEnd('/'))),
+                    IsFile       = false,
+                    IsDirectory  = true,
+                };
+
+            foreach (var obj in resp.S3Objects ?? [])
+            {
+                if (obj.Key.EndsWith('/')) continue; // directory-marker object
+                yield return new VfsNodeInfo
+                {
+                    RelativePath = VfsPath.From(StripPrefix(obj.Key)),
+                    IsFile       = true,
+                    IsDirectory  = false,
+                    SizeBytes    = obj.Size,
+                    ModifiedAt   = ToUtc(obj.LastModified),
+                    Properties   = obj.ETag is null
+                        ? ImmutableDictionary<string, object>.Empty
+                        : ImmutableDictionary<string, object>.Empty.Add("ETag", obj.ETag),
+                };
+            }
+
+            token = resp.IsTruncated == true ? resp.NextContinuationToken : null;
+        }
+        while (token is not null);
+    }
+
+    public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
+    {
+        var rel = Rel(request);
+        if (rel.Length == 0)                    // the mount root is always a directory
+            return new VfsNodeInfo { RelativePath = request.Path, IsFile = false, IsDirectory = true };
+
+        var key = KeyFor(rel);
+        try
+        {
+            var meta  = await _s3.GetObjectMetadataAsync(
+                new GetObjectMetadataRequest { BucketName = _bucket, Key = key }, ct);
+            var props = ImmutableDictionary<string, object>.Empty;
+            if (meta.ETag is not null)               props = props.Add("ETag", meta.ETag);
+            if (meta.Headers?.ContentType is { } cty) props = props.Add("ContentType", cty);
+
+            return new VfsNodeInfo
+            {
+                RelativePath = request.Path,
+                IsFile       = true,
+                IsDirectory  = false,
+                SizeBytes    = meta.ContentLength,
+                ModifiedAt   = ToUtc(meta.LastModified),
+                Properties   = props,
+            };
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Not an object - treat as a directory if any child keys exist under "key/".
+            var resp = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = _bucket, Prefix = key + "/", MaxKeys = 1,
+            }, ct);
+
+            var hasChildren = (resp.S3Objects?.Count ?? 0) > 0 || (resp.CommonPrefixes?.Count ?? 0) > 0;
+            return hasChildren
+                ? new VfsNodeInfo { RelativePath = request.Path, IsFile = false, IsDirectory = true }
+                : null;
+        }
+    }
+
+    // -- Helpers ---------------------------------------------------------------
+
+    private static string Rel(VfsNodeRequest request) => new(request.Path.PathSpan);
+
+    private string KeyFor(string rel)
+        => _prefix.Length == 0 ? rel : rel.Length == 0 ? _prefix : $"{_prefix}/{rel}";
+
+    private string StripPrefix(string key)
+        => _prefix.Length == 0 ? key : key.Length > _prefix.Length ? key[(_prefix.Length + 1)..] : "";
+
+    private string ListPrefixFor(string relDir)
+    {
+        if (relDir.Length == 0) return _prefix.Length == 0 ? "" : _prefix + "/";
+        return KeyFor(relDir) + "/";
+    }
+
+    private async Task<bool> ObjectExistsAsync(string key, CancellationToken ct)
+    {
+        try
+        {
+            await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest { BucketName = _bucket, Key = key }, ct);
+            return true;
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+    }
+
+    private static DateTimeOffset? ToUtc(DateTime? dt)
+        => dt.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(dt.Value, DateTimeKind.Utc)) : null;
+}
+
+// Buffers written bytes to a temp file, then uploads to S3 once on dispose via
+// TransferUtility (which switches to multipart automatically for large payloads).
+// S3 has no streaming-append write, so we stage locally then upload atomically.
+internal sealed class S3CommitStream : Stream
+{
+    private readonly IAmazonS3  _s3;
+    private readonly string     _bucket;
+    private readonly string     _key;
+    private readonly string     _tempPath;
+    private readonly FileStream _temp;
+    private          bool       _committed;
+
+    public S3CommitStream(IAmazonS3 s3, string bucket, string key)
+    {
+        _s3       = s3;
+        _bucket   = bucket;
+        _key      = key;
+        _tempPath = Path.Combine(Path.GetTempPath(), "vfs-s3-" + Guid.NewGuid().ToString("N"));
+        _temp     = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
+                                   FileShare.None, bufferSize: 4096, useAsync: true);
+    }
+
+    public override bool CanWrite => true;
+    public override bool CanRead  => false;
+    public override bool CanSeek  => false;
+    public override long Length   => _temp.Length;
+    public override long Position { get => _temp.Position; set => throw new NotSupportedException(); }
+
+    public override void Write(byte[] buffer, int offset, int count) => _temp.Write(buffer, offset, count);
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        => _temp.WriteAsync(buffer, offset, count, ct);
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        => _temp.WriteAsync(buffer, ct);
+    public override void Flush() => _temp.Flush();
+
+    public override int  Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin)       => throw new NotSupportedException();
+    public override void SetLength(long value)                      => throw new NotSupportedException();
+
+    public override async ValueTask DisposeAsync()
+    {
+        await CommitAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) CommitAsync().GetAwaiter().GetResult();
+        base.Dispose(disposing);
+    }
+
+    private async Task CommitAsync()
+    {
+        if (_committed) return;
+        _committed = true;
+        try
+        {
+            await _temp.FlushAsync().ConfigureAwait(false);
+            _temp.Position = 0;
+            var transfer = new TransferUtility(_s3);
+            await transfer.UploadAsync(_temp, _bucket, _key).ConfigureAwait(false);
+        }
+        finally
+        {
+            await _temp.DisposeAsync().ConfigureAwait(false);
+            try { File.Delete(_tempPath); } catch { /* best-effort cleanup */ }
+        }
+    }
+}

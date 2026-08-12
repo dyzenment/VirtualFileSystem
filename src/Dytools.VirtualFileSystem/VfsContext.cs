@@ -29,10 +29,12 @@ namespace Dytools.VirtualFileSystem;
 public sealed class VfsContext
 {
     private readonly IVfsMountRegistry _registry;
+    private readonly IServiceProvider? _ambient;   // scope used to resolve scoped/transient nodes
 
-    internal VfsContext(VfsPath path, IVfsMountRegistry registry)
+    internal VfsContext(VfsPath path, IVfsMountRegistry registry, IServiceProvider? ambient = null)
     {
         _registry = registry;
+        _ambient  = ambient;
         Reroute(path);
     }
 
@@ -79,7 +81,7 @@ public sealed class VfsContext
     // Also correct for same-mount rewrites (registry lookup stamps the new mount length).
     public void Reroute(VfsPath newPath)
     {
-        var (node, mount, resolved) = _registry.Resolve(newPath);
+        var (node, mount, resolved) = _registry.Resolve(newPath, _ambient);
         ResolvedNode = node;
         MountPoint   = mount;
         _resolved    = resolved;

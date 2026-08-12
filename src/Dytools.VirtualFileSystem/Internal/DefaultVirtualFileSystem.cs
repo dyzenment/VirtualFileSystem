@@ -4,10 +4,11 @@ using System.Text.Json;
 namespace Dytools.VirtualFileSystem.Internal;
 
 
-internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
+internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
 {
     private readonly IVfsMountRegistry _sharedRegistry;
     private readonly VfsPipeline       _pipeline;
+    private readonly IServiceProvider? _ambient;            // the scope this instance was resolved from
     private readonly VfsPath?          _currentDirectory;
     private          VfsMountRegistry? _localRegistry;
     private          bool              _disposed;
@@ -15,20 +16,24 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
     public DefaultVirtualFileSystem(
         IVfsMountRegistry registry,
         VfsPipeline pipeline,
+        IServiceProvider? ambient = null,
         string? currentDirectory = null)
     {
         _sharedRegistry   = registry;
         _pipeline         = pipeline;
+        _ambient          = ambient;
         _currentDirectory = currentDirectory is null ? null : VfsPath.From(currentDirectory);
     }
 
     public DefaultVirtualFileSystem(
         IVfsMountRegistry registry,
         VfsPipeline pipeline,
+        IServiceProvider? ambient,
         VfsPath currentDirectory)
     {
         _sharedRegistry   = registry;
         _pipeline         = pipeline;
+        _ambient          = ambient;
         _currentDirectory = currentDirectory;
     }
 
@@ -45,7 +50,7 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
     public IVirtualFileSystem ScopeTo(string path)
     {
         var resolvedPath = VfsPath.From(path, _currentDirectory ?? _root);
-        return new DefaultVirtualFileSystem(ActiveRegistry, _pipeline, resolvedPath);
+        return new DefaultVirtualFileSystem(ActiveRegistry, _pipeline, _ambient, resolvedPath);
     }
 
     // -- Instance mounting -----------------------------------------------------
@@ -112,7 +117,7 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
         {
             var childCtx = new VfsContext(
                 VfsPath.From(ctx.MountPoint, nodeInfo.RelativePath),
-                ActiveRegistry);
+                ActiveRegistry, _ambient);
             yield return Enrich(nodeInfo, childCtx);
         }
     }
@@ -144,7 +149,7 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
     private static readonly VfsPath _root = VfsPath.From("/");
 
     private VfsContext Ctx(string path)
-        => new(VfsPath.From(path, _currentDirectory ?? _root), ActiveRegistry);
+        => new(VfsPath.From(path, _currentDirectory ?? _root), ActiveRegistry, _ambient);
 
     // Compose VfsNodeInfo (node-relative, node-known) into VfsEntryInfo (VFS-canonical).
     // The node's RelativePath gives us correct storage casing.
@@ -184,4 +189,8 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem
         _disposed = true;
         return ValueTask.CompletedTask;
     }
+
+    // Also IDisposable so DI scopes disposed synchronously (console, background services,
+    // `using var scope = ...`) can release this instance without requiring async disposal.
+    public void Dispose() => _disposed = true;
 }

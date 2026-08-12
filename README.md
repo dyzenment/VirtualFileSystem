@@ -179,10 +179,107 @@ or use the built-ins: `.AddRewriter(...)` for path rewriting and `.UseSymlinks()
 for node-level symlink following (zero overhead for nodes that don't opt in).
 
 ### Capabilities
-Nodes can expose optional behaviour beyond the core contract - e.g. content-hash
-deduplication / hard links via `IDeduplicatingNode`. Consumers discover it at a
-path with `vfs.GetCapability<T>(path)`, which returns `null` when the owning node
-doesn't implement it. The core never calls capability interfaces itself.
+Nodes can expose optional behaviour beyond the core contract - e.g. a dedupe node
+exposes its `IVfsCatalog`. Consumers discover it at a path with
+`vfs.GetCapability<T>(path)`, which returns `null` when the owning node doesn't
+implement it. The core never calls capability interfaces itself.
+
+## Mounting nodes
+
+A mount binds a node to a path prefix. Two overloads - an instance, or a factory
+with a lifetime - cover every case:
+
+```csharp
+// 1. A pre-built instance - one node for the whole app (singleton).
+.Mount("/mem", new InMemoryKvNode())
+
+// 2. A factory - build the node from the service provider, with a lifetime.
+.Mount("/s3", sp => new S3Node(sp.GetRequiredService<IAmazonS3>(), "bucket"),
+       MountLifetime.Singleton)
+
+// 3. Resolve a node you registered in DI, by type.
+//    services.AddScoped(sp => new DedupeNode(new LocalFsNode("/data/blobs"),
+//                                            sp.GetRequiredService<IVfsCatalog>()));
+.Mount("/files", sp => sp.GetRequiredService<DedupeNode>(), MountLifetime.Scoped)
+```
+
+### Lifetimes
+
+The factory overload takes a `MountLifetime` that decides how often the node is
+built and against which DI scope:
+
+| Lifetime | Built | Use for |
+|---|---|---|
+| `Singleton` | once, from the root provider | stateless nodes / shared clients (S3, Azure) |
+| `Scoped` | once per DI scope (a web request) | nodes that share the request's scoped services (a `DbContext`) |
+| `Transient` *(default)* | per operation | a fresh node each call; scoped deps still come from the caller's scope |
+
+Because `IVirtualFileSystem` is resolved per request, a `Scoped` mount's node is
+built from the **request scope** - so it shares that request's `DbContext`, with no
+`IDbContextFactory` needed:
+
+```csharp
+services.AddScoped<IVfsCatalog, EfVfsCatalog>();          // your EF Core-backed catalog
+
+services.AddVirtualFileSystem()
+    .Mount("/archive",
+        sp => new DedupeNode(new LocalFsNode("/data/blobs"),
+                             sp.GetRequiredService<IVfsCatalog>()),
+        MountLifetime.Scoped);                            // node + catalog per request
+```
+
+Resolve `IVirtualFileSystem` from the request (a controller, minimal-API handler,
+or scoped service) and the catalog is the same one the rest of the request uses.
+Outside a request (console, background service) create a scope first and resolve
+`IVirtualFileSystem` from it.
+
+### Composing nodes
+
+Nodes are decorators - stack them by nesting constructors in the factory:
+
+```csharp
+.Mount("/files", sp => new DedupeNode(new LocalFsNode("/data/blobs"),
+                                      sp.GetRequiredService<IVfsCatalog>()))
+```
+
+### Reusing a backend with `NodeAt`
+
+To back several decorator mounts with **one** configured backend, reference it by
+path with `sp.NodeAt("/path")` instead of reconstructing it. Here a deduplicating
+mount keeps its blobs in a plain local-disk mount:
+
+```csharp
+services.AddVirtualFileSystem()
+    // Physical storage, configured once.
+    .Mount("/disk", new LocalFsNode("/var/data"))
+    // A deduplicating view whose blobs live under /disk/blobs, referenced via NodeAt.
+    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/blobs"));
+```
+
+Every write to `/files/...` is content-hashed and stored once under
+`/disk/blobs/.blobs/<hash>`; the path→hash mapping lives in the catalog. Point as
+many mounts at `/disk` (or at an `/azure` / `/s3` mount) as you like - the backend
+is defined in a single place. `NodeAt` forwards straight to the target node
+(skipping the middleware pipeline) and is guarded against cyclic references.
+
+Don't want the blobs on disk to look like hashes? Turn on `ReadableBlobNames` and
+each new blob is stored under the file name that first saved it (with a `-N` suffix
+on collision), while dedup still keys on the content hash:
+
+```csharp
+.MountDeduplicated("/files", sp => sp.NodeAt("/disk/blobs"),
+    options: new DedupeOptions { ReadableBlobNames = true, FanOut = 0 });
+// "/files/2026/report.pdf" → /disk/blobs/report.pdf   (a second, different report.pdf → report-2.pdf)
+```
+
+The catalog entry records both: `ContentId` is the storage key (the readable name),
+`Hash` is the content fingerprint used for deduplication.
+
+Reach the dedupe catalog through the capability system:
+
+```csharp
+var catalog = vfs.GetCapability<IVfsCatalog>("/files");
+```
 
 ## Built-in providers
 
@@ -198,10 +295,14 @@ Both are BCL-only and bundled into the core package.
 Cloud backends are published as their own packages so their SDK dependencies
 stay out of projects that don't use them:
 
-| Package | Backend | Status |
+| Package | Backend | Mount helper |
 |---|---|---|
-| `Dytools.VirtualFileSystem.S3` | Amazon S3 (`AWSSDK.S3`) | planned |
-| `Dytools.VirtualFileSystem.Azure` | Azure Blob Storage (`Azure.Storage.Blobs`) | planned |
+| [`Dytools.VirtualFileSystem.S3`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.S3/) | Amazon S3 (`AWSSDK.S3`) | `.MountS3("/archive", "my-bucket")` |
+| [`Dytools.VirtualFileSystem.Azure`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.Azure/) | Azure Blob Storage (`Azure.Storage.Blobs`) | `.MountAzureBlob("/team", "docs")` |
+
+Each wraps a caller-supplied, singleton SDK client (`IAmazonS3` /
+`BlobServiceClient`), so credentials stay in your DI configuration and never enter
+this library. See each package's README for setup.
 
 ## Writing a custom node
 
@@ -222,6 +323,41 @@ public sealed class MyNode : VfsNodeBase
 See [`samples/`](samples/Dytools.VirtualFileSystem.Sample/Program.cs) for a
 runnable demo covering aliases, node-level symlinks, and hard-link deduplication.
 
+## Running the sample
+
+The sample project offers a menu, or takes the choice as an argument:
+
+```bash
+dotnet run --project samples/Dytools.VirtualFileSystem.Sample
+```
+
+```
+  1) Basic demo       (in-memory: aliases, symlinks, deduplication)
+  2) S3 smoke test    (live bucket)
+  3) Azure smoke test (live container)
+```
+
+- **Basic** runs entirely in-memory - no configuration needed.
+- **S3** / **Azure** run a live write → read → list → copy → delete roundtrip
+  against a real backend, to verify the provider packages end to end.
+
+Skip the menu by passing the option, and supply connection details via
+environment variables (or answer the prompts):
+
+```bash
+# S3 (real AWS via the default credential chain, or MinIO/LocalStack via VFS_S3_SERVICE_URL)
+VFS_S3_BUCKET=my-bucket dotnet run --project samples/Dytools.VirtualFileSystem.Sample -- s3
+
+# Azure Blob (real account, or Azurite via 'UseDevelopmentStorage=true')
+VFS_AZURE_CONNECTION_STRING='UseDevelopmentStorage=true' \
+VFS_AZURE_CONTAINER=smoketest \
+  dotnet run --project samples/Dytools.VirtualFileSystem.Sample -- azure
+```
+
+Recognized env vars: `VFS_S3_BUCKET`, `VFS_S3_PREFIX`, `VFS_S3_SERVICE_URL`,
+`VFS_S3_REGION`, `VFS_S3_ACCESS_KEY`, `VFS_S3_SECRET_KEY`;
+`VFS_AZURE_CONNECTION_STRING`, `VFS_AZURE_CONTAINER`, `VFS_AZURE_PREFIX`.
+
 ## Building from source
 
 ```bash
@@ -232,7 +368,9 @@ dotnet test
 Repository layout:
 
 ```
-src/        Dytools.VirtualFileSystem      the published package (core + built-in providers)
+src/        Dytools.VirtualFileSystem        core + built-in in-memory/local-fs providers
+            Dytools.VirtualFileSystem.S3     Amazon S3 provider (separate package)
+            Dytools.VirtualFileSystem.Azure  Azure Blob provider (separate package)
 samples/    Dytools.VirtualFileSystem.Sample
 tests/      Dytools.VirtualFileSystem.Tests
 benchmarks/ Dytools.VirtualFileSystem.Benchmarks

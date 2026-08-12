@@ -16,6 +16,8 @@
     <Project Path="samples/Dytools.VirtualFileSystem.Sample/Dytools.VirtualFileSystem.Sample.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Dytools.VirtualFileSystem.Azure/Dytools.VirtualFileSystem.Azure.csproj" />
+    <Project Path="src/Dytools.VirtualFileSystem.S3/Dytools.VirtualFileSystem.S3.csproj" />
     <Project Path="src/Dytools.VirtualFileSystem/Dytools.VirtualFileSystem.csproj" />
   </Folder>
   <Folder Name="/tests/">
