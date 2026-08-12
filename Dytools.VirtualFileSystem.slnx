@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Dytools.VirtualFileSystem.Benchmarks/Dytools.VirtualFileSystem.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/config/">
+    <File Path=".gitignore" />
+    <File Path=".github/workflows/ci.yml" />
+    <File Path=".github/workflows/release.yml" />
+  </Folder>
+  <Folder Name="/docs/">
+    <File Path="LICENSE" />
+    <File Path="NOTICE" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Dytools.VirtualFileSystem.Sample/Dytools.VirtualFileSystem.Sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Dytools.VirtualFileSystem/Dytools.VirtualFileSystem.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Dytools.VirtualFileSystem.Tests/Dytools.VirtualFileSystem.Tests.csproj" />
+  </Folder>
+</Solution>

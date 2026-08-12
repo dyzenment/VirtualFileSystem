@@ -1,0 +1,35 @@
+<Project>
+
+  <!-- Shared build settings for every project in the repo -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <!-- Shared package / repository metadata (only packable projects actually pack) -->
+  <PropertyGroup>
+    <Authors>Dytools</Authors>
+    <Company>Dytools</Company>
+    <Product>Dytools.VirtualFileSystem</Product>
+    <Copyright>Copyright © 2026 Michael Shaffer</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/dyzenment/VirtualFileSystem</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dyzenment/VirtualFileSystem</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Single source of truth for the version of every package in this repo.
+         Override per-release from CI with -p:Version=x.y.z (or a git tag). -->
+    <VersionPrefix>0.1.0</VersionPrefix>
+  </PropertyGroup>
+
+  <!-- Reproducible builds when running in CI -->
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

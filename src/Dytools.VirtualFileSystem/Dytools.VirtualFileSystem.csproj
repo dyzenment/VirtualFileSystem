@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dytools.VirtualFileSystem</RootNamespace>
+    <AssemblyName>Dytools.VirtualFileSystem</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Don't warn on undocumented public members -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet package metadata -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Dytools.VirtualFileSystem</PackageId>
+    <Title>Dytools Virtual File System</Title>
+    <Description>A stream-first, mount-based virtual filesystem for .NET. Mount local disk, in-memory, and custom backends under a single path tree, with cross-cutting concerns (auth, auditing, path rewriting, symlink following) composed through an ordered middleware pipeline. Ships with built-in in-memory and local-filesystem providers; cloud backends (S3, Azure) are available as separate add-on packages.</Description>
+    <PackageTags>vfs;virtual-filesystem;filesystem;storage;streams;middleware;mount;abstraction;dotnet</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon></PackageIcon>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- Pack the repo README onto the NuGet page -->
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
