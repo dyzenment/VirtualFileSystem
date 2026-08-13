@@ -5,8 +5,10 @@ namespace Dytools.VirtualFileSystem.Catalog;
 // node, an encrypted blob id for an encryption node, a backend key for a cache).
 public sealed record CatalogEntry
 {
-    // Mount-relative, normalized path ('/'-separated, no leading '/'). "" is the root.
-    public required string         Path        { get; init; }
+    // Mount-relative path, carrying the full identity (base + stream/ADS + query). "" is
+    // the root. VfsPath (not string) so implementations get the structured path without
+    // parsing and never lose the stream/query components.
+    public required VfsPath        Path        { get; init; }
     public required bool           IsDirectory { get; init; }
 
     // Storage key for the bytes (the "inode"). Defaults to the content hash, but a node

@@ -249,15 +249,18 @@ path with `sp.NodeAt("/path")` instead of reconstructing it. Here a deduplicatin
 mount keeps its blobs in a plain local-disk mount:
 
 ```csharp
-services.AddVirtualFileSystem()
+services
+    // Register a catalog (required — see below). The built-in JSON one persists to a store.
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
+    .AddVirtualFileSystem()
     // Physical storage, configured once.
     .Mount("/disk", new LocalFsNode("/var/data"))
-    // A deduplicating view whose blobs live under /disk/blobs, referenced via NodeAt.
-    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/blobs"));
+    // A deduplicating view whose blobs live under /disk/files, referenced via NodeAt.
+    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"));
 ```
 
 Every write to `/files/...` is content-hashed and stored once under
-`/disk/blobs/.blobs/<hash>`; the path→hash mapping lives in the catalog. Point as
+`/disk/files/.blobs/<hash>`; the path→hash mapping lives in the catalog. Point as
 many mounts at `/disk` (or at an `/azure` / `/s3` mount) as you like - the backend
 is defined in a single place. `NodeAt` forwards straight to the target node
 (skipping the middleware pipeline) and is guarded against cyclic references.
@@ -267,9 +270,9 @@ each new blob is stored under the file name that first saved it (with a `-N` suf
 on collision), while dedup still keys on the content hash:
 
 ```csharp
-.MountDeduplicated("/files", sp => sp.NodeAt("/disk/blobs"),
+.MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"),
     options: new DedupeOptions { ReadableBlobNames = true, FanOut = 0 });
-// "/files/2026/report.pdf" → /disk/blobs/report.pdf   (a second, different report.pdf → report-2.pdf)
+// "/files/2026/report.pdf" → /disk/files/report.pdf   (a second, different report.pdf → report-2.pdf)
 ```
 
 The catalog entry records both: `ContentId` is the storage key (the readable name),
@@ -280,6 +283,66 @@ Reach the dedupe catalog through the capability system:
 ```csharp
 var catalog = vfs.GetCapability<IVfsCatalog>("/files");
 ```
+
+### The dedupe catalog
+
+The catalog is the durable namespace — `path → { contentId, hash, size, timestamps }` —
+and the source of truth for what a dedupe mount holds (the blob store only keeps hashed
+content). Because losing it orphans every blob, **you register a catalog** — there is no
+default, and a mount with none resolvable fails at startup.
+
+`MountDeduplicated` resolves its catalog from DI:
+
+```csharp
+public static IVfsBuilder MountDeduplicated(this IVfsBuilder builder,
+    string mountPoint, Func<IServiceProvider, IVfsNode> inner,
+    string? catalogPartitionKey = null,   // isolate one catalog across several mounts
+    object? catalogServiceKey   = null,   // pick a keyed IVfsCatalog; null = the default one
+    DedupeOptions? options = null, MountLifetime lifetime = MountLifetime.Singleton);
+```
+
+`IVfsCatalog` speaks `VfsPath` (base + stream/ADS + query), not `string` — implementers get
+the structured path with no parsing; load/save consumers never touch it.
+
+**Built-in `JsonFileVfsCatalog`** — durable, zero-dependency, stores the namespace as a JSON
+document in a store you give it. Register it with `AddVfsJsonCatalog`; it holds an in-memory
+index, so keep the mount `Singleton` (the default). Great for getting started and small/medium
+namespaces; each save rewrites the file, so for high write volume implement `IVfsCatalog` over
+a database.
+
+```csharp
+services
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
+    .AddVirtualFileSystem()
+    .Mount("/disk", new LocalFsNode("/var/data"))
+    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"));
+```
+
+**One catalog, several mounts.** Catalog keys are mount-relative, so a shared catalog must be
+partitioned or paths collide (`/files/x` vs `/archive/x` are both `x`). Pass a
+`catalogPartitionKey`; the catalog must be an `IPartitionedVfsCatalog` (its `ForPartition(key)`
+returns an isolated view — `JsonFileVfsCatalog` writes one file per partition). Refcounts scope
+to the partition too, so GC stays correct:
+
+```csharp
+services
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
+    .AddVirtualFileSystem()
+    .MountDeduplicated("/files",   sp => sp.NodeAt("/disk/files"),   catalogPartitionKey: "files")
+    .MountDeduplicated("/archive", sp => sp.NodeAt("/disk/archive"), catalogPartitionKey: "archive");
+```
+
+**Multiple catalogs.** Register keyed catalogs and select per mount with `catalogServiceKey`:
+
+```csharp
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/cat-a"), serviceKey: "a");
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/cat-b"), serviceKey: "b");
+// .MountDeduplicated("/files", …, catalogServiceKey: "a")
+```
+
+**Database-backed.** Implement `IVfsCatalog` over your DB (add a partition column and filter
+every query — including reference counts — by it to support `ForPartition`), register it
+(`Scoped` if it shares the request `DbContext`), and mount as above.
 
 ## Built-in providers
 

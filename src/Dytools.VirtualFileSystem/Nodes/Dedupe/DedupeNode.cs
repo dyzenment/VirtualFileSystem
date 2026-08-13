@@ -12,20 +12,22 @@ namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 // Copy/Move are catalog-only (no byte movement). Identical content collapses to one
 // blob; editing a path forks it to a new hash, leaving others untouched.
 //
-//   new DedupeNode(new LocalFsNode("/data"))              // in-memory catalog (tests)
-//   new DedupeNode(new LocalFsNode("/data"), dbCatalog)   // durable catalog (production)
+//   var store = new LocalFsNode("/data");
+//   new DedupeNode(store, new JsonFileVfsCatalog(store))   // durable, zero-dependency catalog
 //
-// The inner node is treated as a dedicated blob store - don't mix plain files into it.
+// The catalog is required — it is the durable source of truth for the namespace, so there
+// is deliberately no in-memory default. The inner node is a dedicated blob store; don't mix
+// plain files into it.
 public sealed class DedupeNode : VfsNodeBase
 {
     private readonly IVfsNode      _inner;
     private readonly IVfsCatalog   _catalog;
     private readonly DedupeOptions _options;
 
-    public DedupeNode(IVfsNode inner, IVfsCatalog? catalog = null, DedupeOptions? options = null)
+    public DedupeNode(IVfsNode inner, IVfsCatalog catalog, DedupeOptions? options = null)
     {
         _inner   = inner;
-        _catalog = catalog ?? new InMemoryVfsCatalog();
+        _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _options = options ?? new DedupeOptions();
     }
 
@@ -33,7 +35,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
-        var entry = await _catalog.GetAsync(PathOf(req), ct);
+        var entry = await _catalog.GetAsync(req.Path, ct);
         if (entry is null || entry.IsDirectory || entry.ContentId is null) return null;
         return await _inner.OpenReadAsync(BlobReq(BlobPath(entry.ContentId)), ct);
     }
@@ -43,7 +45,7 @@ public sealed class DedupeNode : VfsNodeBase
     public override async Task<Stream> OpenWriteAsync(
         VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
-        var path     = PathOf(req);
+        var path     = req.Path;
         var existing = await _catalog.GetAsync(path, ct);
 
         if (mode == VfsWriteMode.CreateNew && existing is not null)
@@ -70,7 +72,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     // Called by DedupeWriteStream on close: hash the buffered content, store the blob
     // once, record the file in the catalog, and GC the previously-referenced blob.
-    internal async Task CommitWriteAsync(string path, FileStream temp, DateTimeOffset createdAt)
+    internal async Task CommitWriteAsync(VfsPath path, FileStream temp, DateTimeOffset createdAt)
     {
         await temp.FlushAsync();
         var size = temp.Length;
@@ -112,9 +114,9 @@ public sealed class DedupeNode : VfsNodeBase
 
     // Derives a readable storage key from the file name, bumping "-N" until it is unique
     // among existing content ids. Called only for content not already stored.
-    private async Task<string> AllocateReadableIdAsync(string path)
+    private async Task<string> AllocateReadableIdAsync(VfsPath path)
     {
-        var leaf = LastSegment(path);
+        var leaf = path.GetName();
         if (string.IsNullOrEmpty(leaf)) leaf = "blob";
 
         var candidate = leaf;
@@ -135,7 +137,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     public override async Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
-        await foreach (var removed in _catalog.RemoveAsync(PathOf(req), ct))
+        await foreach (var removed in _catalog.RemoveAsync(req.Path, ct))
         {
             if (removed.ContentId is { } id && await _catalog.ReferenceCountAsync(id, ct) == 0)
                 await _inner.DeleteAsync(BlobReq(BlobPath(id)), ct);
@@ -146,8 +148,8 @@ public sealed class DedupeNode : VfsNodeBase
 
     public override async Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
-        var from  = PathOf(src);
-        var to    = PathOf(dst);
+        var from  = src.Path;
+        var to    = dst.Path;
         var entry = await _catalog.GetAsync(from, ct)
                     ?? throw new FileNotFoundException($"VFS dedupe copy source not found: {from}");
 
@@ -157,14 +159,14 @@ public sealed class DedupeNode : VfsNodeBase
     }
 
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
-        => _catalog.MoveAsync(PathOf(src), PathOf(dst), ct).AsTask();
+        => _catalog.MoveAsync(src.Path, dst.Path, ct).AsTask();
 
-    private async Task CopyTreeAsync(string src, string dst, DateTimeOffset now, CancellationToken ct)
+    private async Task CopyTreeAsync(VfsPath src, VfsPath dst, DateTimeOffset now, CancellationToken ct)
     {
         await _catalog.EnsureDirectoryAsync(dst, now, ct);
         await foreach (var child in _catalog.ListChildrenAsync(src, ct))
         {
-            var childDst = dst + "/" + LastSegment(child.Path);
+            var childDst = VfsPath.From(dst, child.Path.GetName());
             if (child.IsDirectory) await CopyTreeAsync(child.Path, childDst, now, ct);
             else await _catalog.PutFileAsync(child with { Path = childDst, CreatedAt = now, ModifiedAt = now }, ct);
         }
@@ -174,23 +176,21 @@ public sealed class DedupeNode : VfsNodeBase
 
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
-        var entry = await _catalog.GetAsync(PathOf(req), ct);
+        var entry = await _catalog.GetAsync(req.Path, ct);
         return entry is null ? null : ToNodeInfo(req.Path, entry);
     }
 
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        await foreach (var child in _catalog.ListChildrenAsync(PathOf(req), ct))
-            yield return ToNodeInfo(VfsPath.From(child.Path), child);
+        await foreach (var child in _catalog.ListChildrenAsync(req.Path, ct))
+            yield return ToNodeInfo(child.Path, child);
     }
 
     // Exposes the catalog so consumers can inspect it: vfs.GetCapability<IVfsCatalog>(path).
     public override T? GetCapability<T>() where T : class => _catalog as T ?? base.GetCapability<T>();
 
     // -- Internals -------------------------------------------------------------
-
-    private static string PathOf(VfsNodeRequest req) => new(req.Path.PathSpan);
 
     private string BlobPath(string id)
         => _options.FanOut > 0 && id.Length > _options.FanOut
@@ -216,12 +216,6 @@ public sealed class DedupeNode : VfsNodeBase
     private static FileStream CreateTemp()
         => new(Path.Combine(Path.GetTempPath(), "vfs-dedupe-" + Guid.NewGuid().ToString("N")),
                FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, bufferSize: 4096, useAsync: true);
-
-    private static string LastSegment(string path)
-    {
-        var i = path.LastIndexOf('/');
-        return i < 0 ? path : path[(i + 1)..];
-    }
 
     private static VfsNodeInfo ToNodeInfo(VfsPath relativePath, CatalogEntry e)
     {

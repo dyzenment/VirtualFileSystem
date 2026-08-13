@@ -76,7 +76,7 @@ public sealed class DedupeNodeTests
     [Fact]
     public async Task Write_Then_Read_Roundtrips()
     {
-        var node = new DedupeNode(new BlobStoreNode());
+        var node = new DedupeNode(new BlobStoreNode(), new InMemoryVfsCatalog());
         await WriteAsync(node, "docs/hello.txt", "Hello, dedupe!");
         Assert.Equal("Hello, dedupe!", await ReadAsync(node, "docs/hello.txt"));
     }
@@ -92,7 +92,7 @@ public sealed class DedupeNodeTests
         await WriteAsync(node, "b/y.txt", "same bytes");
 
         Assert.Equal(1, inner.BlobCount);   // dedup: only one physical blob
-        var id = (await catalog.GetAsync("a/x.txt"))!.ContentId!;
+        var id = (await catalog.GetAsync(VfsPath.From("a/x.txt")))!.ContentId!;
         Assert.Equal(2, await catalog.ReferenceCountAsync(id));
         Assert.Equal("same bytes", await ReadAsync(node, "a/x.txt"));
         Assert.Equal("same bytes", await ReadAsync(node, "b/y.txt"));
@@ -102,7 +102,7 @@ public sealed class DedupeNodeTests
     public async Task Copy_IsMetadataOnly_SharesBlob()
     {
         var inner = new BlobStoreNode();
-        var node = new DedupeNode(inner);
+        var node = new DedupeNode(inner, new InMemoryVfsCatalog());
 
         await WriteAsync(node, "src.txt", "payload");
         await node.CopyAsync(Req("src.txt"), Req("copy.txt"));
@@ -116,7 +116,7 @@ public sealed class DedupeNodeTests
     public async Task Overwrite_Forks_And_GCsOldBlob()
     {
         var inner = new BlobStoreNode();
-        var node = new DedupeNode(inner);
+        var node = new DedupeNode(inner, new InMemoryVfsCatalog());
 
         await WriteAsync(node, "f.txt", "version one");
         await WriteAsync(node, "f.txt", "version two");   // overwrite → old blob orphaned
@@ -129,7 +129,7 @@ public sealed class DedupeNodeTests
     public async Task Delete_RemovesBlob_OnLastReference()
     {
         var inner = new BlobStoreNode();
-        var node = new DedupeNode(inner);
+        var node = new DedupeNode(inner, new InMemoryVfsCatalog());
 
         await WriteAsync(node, "a.txt", "shared");
         await WriteAsync(node, "b.txt", "shared");
@@ -147,7 +147,7 @@ public sealed class DedupeNodeTests
     public async Task Move_RenamesWithoutTouchingBlobs()
     {
         var inner = new BlobStoreNode();
-        var node = new DedupeNode(inner);
+        var node = new DedupeNode(inner, new InMemoryVfsCatalog());
 
         await WriteAsync(node, "old/name.txt", "data");
         await node.MoveAsync(Req("old/name.txt"), Req("new/name.txt"));
@@ -160,7 +160,7 @@ public sealed class DedupeNodeTests
     [Fact]
     public async Task List_ReturnsChildren_FilesAndDirs()
     {
-        var node = new DedupeNode(new BlobStoreNode());
+        var node = new DedupeNode(new BlobStoreNode(), new InMemoryVfsCatalog());
         await WriteAsync(node, "dir/a.txt", "a");
         await WriteAsync(node, "dir/b.txt", "b");
         await WriteAsync(node, "dir/sub/c.txt", "c");
@@ -178,7 +178,7 @@ public sealed class DedupeNodeTests
     [Fact]
     public async Task Append_ExtendsContent()
     {
-        var node = new DedupeNode(new BlobStoreNode());
+        var node = new DedupeNode(new BlobStoreNode(), new InMemoryVfsCatalog());
         await WriteAsync(node, "log.txt", "line1");
 
         await using (var a = await node.OpenWriteAsync(Req("log.txt"), VfsWriteMode.Append))
@@ -190,7 +190,7 @@ public sealed class DedupeNodeTests
     [Fact]
     public async Task CreateNew_Throws_WhenExists()
     {
-        var node = new DedupeNode(new BlobStoreNode());
+        var node = new DedupeNode(new BlobStoreNode(), new InMemoryVfsCatalog());
         await WriteAsync(node, "x.txt", "first");
         await Assert.ThrowsAsync<IOException>(async () =>
         {
@@ -213,7 +213,7 @@ public sealed class DedupeNodeTests
         var node = new DedupeNode(new BlobStoreNode(), catalog);
 
         await WriteAsync(node, "f.txt", "hash me");
-        var e = (await catalog.GetAsync("f.txt"))!;
+        var e = (await catalog.GetAsync(VfsPath.From("f.txt")))!;
 
         Assert.NotNull(e.Hash);
         Assert.Equal(64, e.Hash!.Length);        // sha256 hex
@@ -228,7 +228,7 @@ public sealed class DedupeNodeTests
         var node = new DedupeNode(inner, catalog, new DedupeOptions { ReadableBlobNames = true, FanOut = 0 });
 
         await WriteAsync(node, "docs/report.pdf", "PDF BYTES");
-        var e = (await catalog.GetAsync("docs/report.pdf"))!;
+        var e = (await catalog.GetAsync(VfsPath.From("docs/report.pdf")))!;
 
         Assert.Equal("report.pdf", e.ContentId);         // storage key is the file name
         Assert.NotEqual(e.ContentId, e.Hash);            // but the hash is recorded separately
@@ -246,8 +246,8 @@ public sealed class DedupeNodeTests
         await WriteAsync(node, "b/summary.pdf", "SAME");   // identical content, different name
 
         Assert.Equal(1, inner.BlobCount);                 // dedup by hash → one blob
-        Assert.Equal("report.pdf", (await catalog.GetAsync("a/report.pdf"))!.ContentId);
-        Assert.Equal("report.pdf", (await catalog.GetAsync("b/summary.pdf"))!.ContentId);  // reuses the first name
+        Assert.Equal("report.pdf", (await catalog.GetAsync(VfsPath.From("a/report.pdf")))!.ContentId);
+        Assert.Equal("report.pdf", (await catalog.GetAsync(VfsPath.From("b/summary.pdf")))!.ContentId);  // reuses the first name
     }
 
     [Fact]
@@ -261,8 +261,8 @@ public sealed class DedupeNodeTests
         await WriteAsync(node, "b/report.pdf", "CONTENT TWO");   // same name, different content
 
         Assert.Equal(2, inner.BlobCount);
-        Assert.Equal("report.pdf",   (await catalog.GetAsync("a/report.pdf"))!.ContentId);
-        Assert.Equal("report-2.pdf", (await catalog.GetAsync("b/report.pdf"))!.ContentId);
+        Assert.Equal("report.pdf",   (await catalog.GetAsync(VfsPath.From("a/report.pdf")))!.ContentId);
+        Assert.Equal("report-2.pdf", (await catalog.GetAsync(VfsPath.From("b/report.pdf")))!.ContentId);
         Assert.Equal("CONTENT ONE", await ReadAsync(node, "a/report.pdf"));
         Assert.Equal("CONTENT TWO", await ReadAsync(node, "b/report.pdf"));
     }
