@@ -37,6 +37,31 @@ bucket, the rest an optional key prefix. The `S3Node` resolves the registered
        MountLifetime.Singleton)
 ```
 
+## Caching catalog (optional)
+
+For faster, cheaper repeated listings, mirror the bucket's structure into an `IVfsCatalog`
+with `UseCachingCatalog()`:
+
+```csharp
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));   // or a database-backed catalog for scale
+
+services.AddVirtualFileSystem()
+    .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket").UseCachingCatalog());
+```
+
+S3 has no cheap delta, so the mirror is **seeded once** (one full listing), then served locally -
+listings (including recursive ones) skip the network, cutting latency and `LIST` cost. Changes
+made **through this VFS** are written through immediately (write/delete/copy/move). Changes made
+**outside** it aren't seen until you re-sync: call `RefreshAsync` on demand -
+
+```csharp
+await vfs.GetCapability<ICatalogMirror>("/archive")!.RefreshAsync();
+```
+
+Select a keyed or partitioned catalog with `UseCatalogServiceKey` / `UseCatalogPartition`. Use a
+database-backed `IVfsCatalog` for large buckets - the built-in JSON catalog rewrites its whole
+file per change and is meant for small/medium namespaces.
+
 ## Notes
 
 - Credentials and region are configured on the `IAmazonS3` client - this package

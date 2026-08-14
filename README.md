@@ -447,9 +447,10 @@ of projects that don't use them:
 S3 and Azure wrap a caller-supplied, singleton SDK client (`IAmazonS3` /
 `BlobServiceClient`); SharePoint takes an `ISharePointTokenProvider` you implement over your
 own credential system. Either way credentials stay in your DI configuration and never enter
-this library. The SharePoint package also adds an **`ISharePointChangeFeed`** delta capability
-and an optional **caching catalog** (`UseCachingCatalog`) that mirrors the drive into an
-`IVfsCatalog` for fast listing of large libraries. See each package's README for setup.
+this library. All three support an optional **caching catalog** (`UseCachingCatalog`) that
+mirrors the backend's structure into an `IVfsCatalog` for fast local listings, refreshable via
+the `ICatalogMirror` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
+delta, while S3/Azure seed once and write through. See each package's README for setup.
 
 ## Writing a custom node
 

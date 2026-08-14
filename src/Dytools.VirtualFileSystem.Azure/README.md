@@ -42,6 +42,30 @@ explicitly, use the factory overload:
     MountLifetime.Singleton)
 ```
 
+## Caching catalog (optional)
+
+For faster, cheaper repeated listings, mirror the container's structure into an `IVfsCatalog`
+with `UseCachingCatalog()`:
+
+```csharp
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));   // or a database-backed catalog for scale
+
+services.AddVirtualFileSystem()
+    .MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs").UseCachingCatalog());
+```
+
+By default the mirror is **seeded once** (one full listing), then served locally - listings
+(including recursive ones) skip the network. Changes made **through this VFS** are written through
+immediately; changes made **outside** it aren't seen until you re-sync:
+
+```csharp
+await vfs.GetCapability<ICatalogMirror>("/team")!.RefreshAsync();
+```
+
+Select a keyed or partitioned catalog with `UseCatalogServiceKey` / `UseCatalogPartition`, and use
+a database-backed `IVfsCatalog` for large containers. (A future option will let accounts with the
+Azure **Blob change feed** enabled keep the mirror fresh incrementally instead of by re-listing.)
+
 ## Notes
 
 - Credentials are configured on the `BlobServiceClient` (connection string,

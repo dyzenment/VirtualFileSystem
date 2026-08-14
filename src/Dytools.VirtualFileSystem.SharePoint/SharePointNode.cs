@@ -27,59 +27,36 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 //   services.AddVirtualFileSystem()
 //       .MountSingleton<SharePointNode>("/team",
 //           o => o.UseSharePointDrive("b!AbC…").UseCachingCatalog());
-public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
+public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalogMirror
 {
     private const long SmallUploadLimit = 4L * 1024 * 1024;        // Graph: single-PUT ceiling
     private const int  ChunkSize        = 320 * 1024 * 10;         // upload-session chunk (mult. of 320 KiB)
 
-    // Reserved catalog entry holding the delta cursor, so the mirror stays incremental across
-    // restarts. Filtered out of listings.
-    private static readonly VfsPath CursorEntry = VfsPath.From(".vfs-sp-delta-cursor");
-
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly HttpClient PlainHttp = new();          // for pre-authed upload-session URLs
 
-    private readonly HttpClient    _http;      // authed Graph client (base https://graph.microsoft.com/v1.0/)
-    private readonly string        _driveId;
-    private readonly string        _rootPath;  // normalized within-drive prefix; "" when none
-    private readonly IVfsCatalog?  _catalog;   // namespace mirror; null = no caching
-    private readonly SemaphoreSlim _syncGate = new(1, 1);
+    private readonly HttpClient     _http;      // authed Graph client (base https://graph.microsoft.com/v1.0/)
+    private readonly string         _driveId;
+    private readonly string         _rootPath;  // normalized within-drive prefix; "" when none
+    private readonly CatalogMirror? _mirror;    // namespace cache; null = no caching
 
     // Activated by MountSingleton<SharePointNode> from the options, the DI token provider, and DI.
     public SharePointNode(VfsMountOptions options, ISharePointTokenProvider tokens, IServiceProvider services)
         : this(GraphHttp.CreateClient(tokens),
                options.Require<SharePointOptions>().DriveId,
                options.Require<SharePointOptions>().RootPath,
-               ResolveCatalog(options, services)) { }
+               CatalogMirror.FromOptions(options.Require<SharePointOptions>().UseCatalog, options, services)) { }
 
     // Advanced / test seam: supply a Graph client whose base address is the Graph v1.0 endpoint
-    // and that already attaches auth, and (optionally) a catalog to mirror into.
-    public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, IVfsCatalog? catalog = null)
+    // and that already attaches auth, and (optionally) a mirror to cache into.
+    public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, CatalogMirror? mirror = null)
     {
         _http    = graphClient ?? throw new ArgumentNullException(nameof(graphClient));
         _driveId = string.IsNullOrWhiteSpace(driveId)
             ? throw new ArgumentException("A Graph drive id is required.", nameof(driveId))
             : driveId;
         _rootPath = rootPath?.Trim('/') ?? "";
-        _catalog  = catalog;
-    }
-
-    private static IVfsCatalog? ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
-    {
-        if (!options.Require<SharePointOptions>().UseCatalog) return null;
-
-        var catalog = options.CatalogServiceKey is null
-            ? sp.GetService<IVfsCatalog>()
-            : sp.GetKeyedService<IVfsCatalog>(options.CatalogServiceKey);
-        if (catalog is null)
-            throw new InvalidOperationException(
-                "UseCachingCatalog was set but no IVfsCatalog is registered. Register one, e.g. "
-                + "services.AddVfsJsonCatalog(sp => sp.NodeAt(\"/dev/catalog\")).");
-
-        if (options.CatalogPartitionKey is null) return catalog;
-        if (catalog is IPartitionedVfsCatalog partitioned) return partitioned.ForPartition(options.CatalogPartitionKey);
-        throw new InvalidOperationException(
-            $"The catalog does not support partitioning (key '{options.CatalogPartitionKey}').");
+        _mirror   = mirror;
     }
 
     // SharePoint item names are case-insensitive.
@@ -94,7 +71,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
             resp.Dispose();
-            if (_catalog is not null) await RemoveFromCatalogAsync(request.Path, ct);   // reconcile a stale entry
+            if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);   // reconcile a stale entry
             return null;
         }
         resp.EnsureSuccessStatusCode();
@@ -124,8 +101,8 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
             ? await UploadSmallAsync(drivePath, temp, conflict)
             : await UploadLargeAsync(drivePath, temp, conflict);
 
-        if (_catalog is not null && item is not null && StripRoot(drivePath) is { } mountRel)
-            await UpsertInfoAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None);
+        if (_mirror is not null && item is not null && StripRoot(drivePath) is { } mountRel)
+            await _mirror.UpsertAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None);
     }
 
     private async Task<DriveItem?> UploadSmallAsync(string drivePath, Stream content, string conflict)
@@ -173,14 +150,14 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
     {
         var resp = await _http.DeleteAsync(ItemUrl(DrivePath(Rel(request))), ct);
         if (resp.StatusCode != HttpStatusCode.NotFound) resp.EnsureSuccessStatusCode();
-        if (_catalog is not null) await RemoveFromCatalogAsync(request.Path, ct);
+        if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
     }
 
     public override async Task RenameAsync(VfsNodeRequest src, string newName, CancellationToken ct = default)
     {
         var resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), new { name = newName }, Json, ct);
         resp.EnsureSuccessStatusCode();
-        await MoveInCatalogAsync(src.Path, src.Path.WithName(newName), ct);
+        if (_mirror is not null) await _mirror.MoveAsync(src.Path, src.Path.WithName(newName), ct);
     }
 
     public override async Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
@@ -196,7 +173,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
         var body = new { parentReference = new { path = parentRefPath }, name };
         var resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), body, Json, ct);
         resp.EnsureSuccessStatusCode();
-        await MoveInCatalogAsync(src.Path, dst.Path, ct);
+        if (_mirror is not null) await _mirror.MoveAsync(src.Path, dst.Path, ct);
     }
 
     // CopyAsync is intentionally left to the VfsNodeBase stream fallback: Graph's native copy is
@@ -209,7 +186,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
         var resp = await _http.GetAsync(ItemUrl(DrivePath(Rel(request))), ct);
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
-            if (_catalog is not null) await RemoveFromCatalogAsync(request.Path, ct);
+            if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
             return null;
         }
         resp.EnsureSuccessStatusCode();
@@ -217,7 +194,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
         if (item is null) return null;
 
         var info = ToNodeInfo(item, request.Path);
-        if (_catalog is not null) await UpsertInfoAsync(info, ct);
+        if (_mirror is not null) await _mirror.UpsertAsync(info, ct);
         return info;
     }
 
@@ -228,23 +205,20 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (_catalog is not null) await SyncAsync(ct);
+        if (_mirror is not null) await SyncAsync(ct);
         await foreach (var info in base.ListAsync(request, options ?? VfsListOptions.Default, ct))
             yield return info;
     }
 
-    // Single-level children: from the catalog when caching (sync already ran in ListAsync), else
+    // Single-level children: from the mirror when caching (sync already ran in ListAsync), else
     // straight from Graph /children.
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (_catalog is not null)
+        if (_mirror is not null)
         {
-            await foreach (var e in _catalog.ListChildrenAsync(request.Path, ct))
-            {
-                if (e.Path == CursorEntry) continue;   // hide the reserved cursor entry
-                yield return CatalogToNodeInfo(e);
-            }
+            await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
+                yield return CatalogMirror.ToNodeInfo(e);
             yield break;
         }
 
@@ -304,50 +278,26 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
             : new SharePointChange(mountRel, SharePointChangeType.Updated, ToNodeInfo(item, VfsPath.From(mountRel)));
     }
 
-    // -- Catalog sync ----------------------------------------------------------
+    // -- Catalog mirror sync ---------------------------------------------------
 
-    private async Task SyncAsync(CancellationToken ct)
+    // Force a delta sync of the mirror (ICatalogMirror). Listing already syncs, so this is for
+    // callers that want an explicit refresh without listing.
+    public Task RefreshAsync(CancellationToken ct = default) => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
+
+    // Incremental delta from the stored cursor, applied through the shared mirror.
+    private Task SyncAsync(CancellationToken ct) => _mirror!.SyncAsync(async token =>
     {
-        await _syncGate.WaitAsync(ct);
-        try
+        var cursor = await _mirror.GetStateAsync("cursor", token);
+        var batch  = await GetChangesAsync(cursor, token);
+
+        foreach (var change in batch.Changes)
         {
-            var cursor = (await _catalog!.GetAsync(CursorEntry, ct))?.Properties.GetString("cursor");
-            var batch  = await GetChangesAsync(cursor, ct);
-
-            foreach (var change in batch.Changes)
-            {
-                if (change.Type == SharePointChangeType.Deleted) await RemoveFromCatalogAsync(VfsPath.From(change.Path), ct);
-                else if (change.Info is not null)                await UpsertInfoAsync(change.Info, ct);
-            }
-
-            if (!string.IsNullOrEmpty(batch.Cursor))
-                await _catalog!.PutFileAsync(new CatalogEntry
-                {
-                    Path       = CursorEntry,
-                    IsDirectory = false,
-                    Properties  = new Dictionary<string, string?> { ["cursor"] = batch.Cursor },
-                }, ct);
+            if (change.Type == SharePointChangeType.Deleted) await _mirror.RemoveAsync(VfsPath.From(change.Path), token);
+            else if (change.Info is not null)                await _mirror.UpsertAsync(change.Info, token);
         }
-        finally { _syncGate.Release(); }
-    }
 
-    private async Task UpsertInfoAsync(VfsNodeInfo info, CancellationToken ct)
-    {
-        if (info.IsDirectory) await _catalog!.EnsureDirectoryAsync(info.RelativePath, info.ModifiedAt ?? default, ct);
-        else                  await _catalog!.PutFileAsync(InfoToCatalog(info), ct);
-    }
-
-    private async Task RemoveFromCatalogAsync(VfsPath path, CancellationToken ct)
-    {
-        await foreach (var _ in _catalog!.RemoveAsync(path, ct)) { }   // drain the removed-file stream
-    }
-
-    private async Task MoveInCatalogAsync(VfsPath from, VfsPath to, CancellationToken ct)
-    {
-        if (_catalog is null) return;
-        if (await _catalog.GetAsync(from, ct) is not null)            // only if the source is mirrored
-            await _catalog.MoveAsync(from, to, ct);
-    }
+        if (!string.IsNullOrEmpty(batch.Cursor)) await _mirror.SetStateAsync("cursor", batch.Cursor, token);
+    }, ct);
 
     // -- Helpers ---------------------------------------------------------------
 
@@ -403,30 +353,4 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed
             Properties   = props,
         };
     }
-
-    private static VfsNodeInfo CatalogToNodeInfo(CatalogEntry e) => new()
-    {
-        RelativePath = e.Path,
-        IsFile       = !e.IsDirectory,
-        IsDirectory  = e.IsDirectory,
-        IsHidden     = e.IsHidden,
-        SizeBytes    = e.Size,
-        CreatedAt    = e.CreatedAt,
-        ModifiedAt   = e.ModifiedAt,
-        AccessedAt   = e.AccessedAt,
-        Properties   = e.Properties is null
-            ? ImmutableDictionary<string, string?>.Empty
-            : ImmutableDictionary.CreateRange(e.Properties),
-    };
-
-    private static CatalogEntry InfoToCatalog(VfsNodeInfo info) => new()
-    {
-        Path        = info.RelativePath,
-        IsDirectory = info.IsDirectory,
-        Size        = info.SizeBytes,
-        CreatedAt   = info.CreatedAt  ?? default,
-        ModifiedAt  = info.ModifiedAt ?? default,
-        ContentType = info.Properties.GetString("ContentType"),
-        Properties  = info.Properties.Count > 0 ? new Dictionary<string, string?>(info.Properties) : null,
-    };
 }

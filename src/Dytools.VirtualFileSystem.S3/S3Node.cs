@@ -5,6 +5,7 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Amazon.S3.Transfer;
 using Dytools.VirtualFileSystem;
+using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.S3;
 
@@ -24,24 +25,27 @@ namespace Dytools.VirtualFileSystem.Nodes.S3;
 // Usage (register an IAmazonS3 in DI, then mount by bucket/prefix):
 //   .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket"))
 //   .MountSingleton<S3Node>("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"))
-public sealed class S3Node : VfsNodeBase
+public sealed class S3Node : VfsNodeBase, ICatalogMirror
 {
-    private readonly IAmazonS3 _s3;
-    private readonly string    _bucket;
-    private readonly string    _prefix;   // normalized: no leading/trailing '/', "" when none
+    private readonly IAmazonS3      _s3;
+    private readonly string         _bucket;
+    private readonly string         _prefix;   // normalized: no leading/trailing '/', "" when none
+    private readonly CatalogMirror? _mirror;   // namespace cache; null = no caching
 
-    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null)
+    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, CatalogMirror? mirror = null)
     {
         _s3     = client ?? throw new ArgumentNullException(nameof(client));
         _bucket = string.IsNullOrWhiteSpace(bucketName)
             ? throw new ArgumentException("Bucket name is required.", nameof(bucketName))
             : bucketName;
         _prefix = keyPrefix?.Trim('/') ?? "";
+        _mirror = mirror;
     }
 
     // Activated by MountSingleton<S3Node> from the configured options + DI client.
-    public S3Node(VfsMountOptions options, IAmazonS3 client)
-        : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix) { }
+    public S3Node(VfsMountOptions options, IAmazonS3 client, IServiceProvider services)
+        : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix,
+               CatalogMirror.FromOptions(options.Require<S3Options>().UseCatalog, options, services)) { }
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
@@ -53,6 +57,7 @@ public sealed class S3Node : VfsNodeBase
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
         {
+            if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);   // reconcile a stale entry
             return null;
         }
     }
@@ -68,29 +73,61 @@ public sealed class S3Node : VfsNodeBase
         if (mode == VfsWriteMode.CreateNew && await ObjectExistsAsync(key, ct))
             throw new IOException($"S3 object already exists: s3://{_bucket}/{key}");
 
-        return new S3CommitStream(_s3, _bucket, key);
+        // Write-through: on commit, record the object in the mirror.
+        var path = request.Path;
+        Func<long, Task>? onCommitted = _mirror is null
+            ? null
+            : size => _mirror.UpsertAsync(new VfsNodeInfo
+            {
+                RelativePath = path, IsFile = true, IsDirectory = false,
+                SizeBytes = size, ModifiedAt = DateTimeOffset.UtcNow,
+            });
+        return new S3CommitStream(_s3, _bucket, key, onCommitted);
     }
 
-    public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
-        => _s3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
+    public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    {
+        await _s3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
+        if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
+    }
 
-    // Native server-side copy. Base MoveAsync/RenameAsync reuse this (copy + delete).
-    public override Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
-        => _s3.CopyObjectAsync(new CopyObjectRequest
+    // Native server-side copy. Base MoveAsync/RenameAsync reuse this (copy + delete), so the mirror
+    // tracks moves too (dst upserted here, src removed by DeleteAsync).
+    public override async Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
+    {
+        await _s3.CopyObjectAsync(new CopyObjectRequest
         {
             SourceBucket      = _bucket, SourceKey      = KeyFor(Rel(src)),
             DestinationBucket = _bucket, DestinationKey = KeyFor(Rel(dst)),
         }, ct);
+        if (_mirror is not null && await GetInfoAsync(dst, ct) is { } info) await _mirror.UpsertAsync(info, ct);
+    }
 
-    // S3 keys are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed
-    // down - it forces a full bucket scan.
+    // S3 keys are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed down -
+    // it forces a full bucket scan (unless a mirror serves the listing locally).
     protected override bool IsCaseSensitive => true;
     protected override bool RequiresFullScan(VfsListOptions options)
-        => !IsPurePrefixPattern(options.SearchPattern);
+        => _mirror is null && !IsPurePrefixPattern(options.SearchPattern);
+
+    // With a mirror: seed once, then serve every listing (incl. recursive) from the local catalog.
+    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+        VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (_mirror is not null) await EnsureSeededAsync(ct);
+        await foreach (var info in base.ListAsync(request, options ?? VfsListOptions.Default, ct))
+            yield return info;
+    }
 
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (_mirror is not null)
+        {
+            await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
+                yield return CatalogMirror.ToNodeInfo(e);
+            yield break;
+        }
+
         var listPrefix = ListPrefixFor(Rel(request));
         string? token = null;
         do
@@ -169,6 +206,54 @@ public sealed class S3Node : VfsNodeBase
         }
     }
 
+    // -- Catalog mirror (ICatalogMirror) ---------------------------------------
+
+    // Force a re-sync of the mirror against the bucket (picks up changes made outside this VFS).
+    public Task RefreshAsync(CancellationToken ct = default) => ResyncAsync(ct);
+
+    private async Task EnsureSeededAsync(CancellationToken ct)
+    {
+        if (await _mirror!.GetStateAsync("seeded", ct) is null) await ResyncAsync(ct);
+    }
+
+    // Full re-list: clear the mirror, then a single flat (delimiter-free) scan of the whole prefix.
+    private Task ResyncAsync(CancellationToken ct) => _mirror!.SyncAsync(async token =>
+    {
+        await _mirror.ClearAsync(token);
+
+        var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
+        string? cont = null;
+        do
+        {
+            var resp = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+            {
+                BucketName = _bucket, Prefix = scanPrefix, ContinuationToken = cont,
+            }, token);
+
+            foreach (var obj in resp.S3Objects ?? [])
+            {
+                if (obj.Key.EndsWith('/')) continue;              // directory-marker object
+                var rel = StripPrefix(obj.Key);
+                if (rel.Length == 0) continue;
+                await _mirror.UpsertAsync(new VfsNodeInfo
+                {
+                    RelativePath = VfsPath.From(rel),
+                    IsFile       = true,
+                    IsDirectory  = false,
+                    SizeBytes    = obj.Size,
+                    ModifiedAt   = ToUtc(obj.LastModified),
+                    Properties   = obj.ETag is null
+                        ? ImmutableDictionary<string, string?>.Empty
+                        : ImmutableDictionary<string, string?>.Empty.Add("ETag", obj.ETag),
+                }, token);
+            }
+            cont = resp.IsTruncated == true ? resp.NextContinuationToken : null;
+        }
+        while (cont is not null);
+
+        await _mirror.SetStateAsync("seeded", "1", token);
+    }, ct);
+
     // -- Helpers ---------------------------------------------------------------
 
     private static string Rel(VfsNodeRequest request) => new(request.Path.PathSpan);
@@ -207,21 +292,23 @@ public sealed class S3Node : VfsNodeBase
 // S3 has no streaming-append write, so we stage locally then upload atomically.
 internal sealed class S3CommitStream : Stream
 {
-    private readonly IAmazonS3  _s3;
-    private readonly string     _bucket;
-    private readonly string     _key;
-    private readonly string     _tempPath;
-    private readonly FileStream _temp;
-    private          bool       _committed;
+    private readonly IAmazonS3        _s3;
+    private readonly string           _bucket;
+    private readonly string           _key;
+    private readonly string           _tempPath;
+    private readonly FileStream       _temp;
+    private readonly Func<long, Task>? _onCommitted;   // write-through the mirror (size in bytes)
+    private          bool             _committed;
 
-    public S3CommitStream(IAmazonS3 s3, string bucket, string key)
+    public S3CommitStream(IAmazonS3 s3, string bucket, string key, Func<long, Task>? onCommitted = null)
     {
-        _s3       = s3;
-        _bucket   = bucket;
-        _key      = key;
-        _tempPath = Path.Combine(Path.GetTempPath(), "vfs-s3-" + Guid.NewGuid().ToString("N"));
-        _temp     = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
-                                   FileShare.None, bufferSize: 4096, useAsync: true);
+        _s3          = s3;
+        _bucket      = bucket;
+        _key         = key;
+        _onCommitted = onCommitted;
+        _tempPath    = Path.Combine(Path.GetTempPath(), "vfs-s3-" + Guid.NewGuid().ToString("N"));
+        _temp        = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
+                                      FileShare.None, bufferSize: 4096, useAsync: true);
     }
 
     public override bool CanWrite => true;
@@ -260,9 +347,11 @@ internal sealed class S3CommitStream : Stream
         try
         {
             await _temp.FlushAsync().ConfigureAwait(false);
+            var size = _temp.Length;
             _temp.Position = 0;
             var transfer = new TransferUtility(_s3);
             await transfer.UploadAsync(_temp, _bucket, _key).ConfigureAwait(false);
+            if (_onCommitted is not null) await _onCommitted(size).ConfigureAwait(false);
         }
         finally
         {

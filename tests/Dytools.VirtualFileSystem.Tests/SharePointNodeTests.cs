@@ -115,9 +115,9 @@ public sealed class SharePointNodeTests
             "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=C1"}
             """;
         var handler = new StubHandler(_ => (HttpStatusCode.OK, delta));
-        var catalog = new JsonFileVfsCatalog(new InMemoryKvNode());
+        var mirror  = new CatalogMirror(new JsonFileVfsCatalog(new InMemoryKvNode()));
         var node    = new SharePointNode(
-            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", null, catalog);
+            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", null, mirror);
 
         var root = new List<string>();
         await foreach (var i in node.ListAsync(Req(""), VfsListOptions.Default))
@@ -126,7 +126,7 @@ public sealed class SharePointNodeTests
         Assert.Contains("a.txt", root);
         Assert.Contains("docs",  root);
         Assert.DoesNotContain("b.txt", root);                       // under docs, not a root child
-        Assert.DoesNotContain(".vfs-sp-delta-cursor", root);        // reserved cursor entry hidden
+        Assert.DoesNotContain(".vfs-mirror-state", root);           // reserved state entry hidden
         Assert.Single(handler.Requests);                           // only the delta call; listing came from the mirror
         Assert.Contains("root/delta", handler.Requests[0]);
 
