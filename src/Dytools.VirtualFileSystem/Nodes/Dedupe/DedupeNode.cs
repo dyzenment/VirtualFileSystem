@@ -33,7 +33,7 @@ public sealed class DedupeNode : VfsNodeBase
     }
 
     // Activated by MountSingleton<DedupeNode>. Resolves the backing store
-    // (UseSource, via NodeAt), the catalog (UseServiceKey + UsePartition), and the algorithm
+    // (UseSource, via NodeAt), the catalog (UseCatalogServiceKey + UseCatalogPartition), and the algorithm
     // options - all from the configured mount options.
     public DedupeNode(VfsMountOptions options, IServiceProvider services)
         : this(ResolveInner(options, services), ResolveCatalog(options, services), ResolveAlgorithm(options)) { }
@@ -48,21 +48,20 @@ public sealed class DedupeNode : VfsNodeBase
 
     private static IVfsCatalog ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
     {
-        var catalog = options.ServiceKey is null
+        var catalog = options.CatalogServiceKey is null
             ? sp.GetService<IVfsCatalog>()
-            : sp.GetKeyedService<IVfsCatalog>(options.ServiceKey);
+            : sp.GetKeyedService<IVfsCatalog>(options.CatalogServiceKey);
 
         if (catalog is null)
             throw new InvalidOperationException(
                 "No IVfsCatalog registered for the dedupe mount. Register one, e.g. "
                 + "services.AddVfsJsonCatalog(sp => sp.NodeAt(\"/path\")).");
 
-        var o = options.Require<DedupeMountOptions>();
-        if (o.PartitionKey is null) return catalog;
+        if (options.CatalogPartitionKey is null) return catalog;
 
-        if (catalog is IPartitionedVfsCatalog partitioned) return partitioned.ForPartition(o.PartitionKey);
+        if (catalog is IPartitionedVfsCatalog partitioned) return partitioned.ForPartition(options.CatalogPartitionKey);
         throw new InvalidOperationException(
-            $"The catalog does not support partitioning (key '{o.PartitionKey}'); it must implement {nameof(IPartitionedVfsCatalog)}.");
+            $"The catalog does not support partitioning (key '{options.CatalogPartitionKey}'); it must implement {nameof(IPartitionedVfsCatalog)}.");
     }
 
     private static DedupeOptions ResolveAlgorithm(VfsMountOptions options)

@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Dytools.VirtualFileSystem\Dytools.VirtualFileSystem.csproj" />
+    <ProjectReference Include="..\..\src\Dytools.VirtualFileSystem.SharePoint\Dytools.VirtualFileSystem.SharePoint.csproj" />
   </ItemGroup>
 
 </Project>

@@ -12,6 +12,7 @@
          Consumers only add the provider package they actually use. -->
     <ProjectReference Include="..\..\src\Dytools.VirtualFileSystem.S3\Dytools.VirtualFileSystem.S3.csproj" />
     <ProjectReference Include="..\..\src\Dytools.VirtualFileSystem.Azure\Dytools.VirtualFileSystem.Azure.csproj" />
+    <ProjectReference Include="..\..\src\Dytools.VirtualFileSystem.SharePoint\Dytools.VirtualFileSystem.SharePoint.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,11 +1,10 @@
 namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 
-// Config carried on the mount options for a DedupeNode. The catalog is selected separately
-// via VfsMountOptions.UseServiceKey (which keyed IVfsCatalog to use).
+// Config carried on the mount options for a DedupeNode. The catalog is selected separately via
+// UseCatalogServiceKey (which keyed IVfsCatalog) and UseCatalogPartition (isolation).
 public sealed class DedupeMountOptions
 {
     public string         Source            { get; set; } = "";   // inner backing path (resolved via NodeAt)
-    public string?        PartitionKey      { get; set; }         // isolate a shared catalog per mount
     public IContentHasher? Hasher           { get; set; }
     public string?        BlobPrefix        { get; set; }
     public int?           FanOut            { get; set; }
@@ -25,10 +24,6 @@ public static class DedupeMountOptionsExtensions
     // backend once and reference it here.
     public static VfsMountOptions UseSource(this VfsMountOptions o, string vfsPath)
     { Dm(o).Source = vfsPath; return o; }
-
-    // Isolate this mount's namespace within a shared catalog (requires an IPartitionedVfsCatalog).
-    public static VfsMountOptions UsePartition(this VfsMountOptions o, string partitionKey)
-    { Dm(o).PartitionKey = partitionKey; return o; }
 
     // Store new blobs under the file name that first saved the content (with a -N suffix on
     // collision) instead of the hash. Dedup still keys on the content hash.

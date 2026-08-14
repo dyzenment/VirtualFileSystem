@@ -35,7 +35,7 @@ internal static class BasicDemo
 
         await using var vfs = provider.GetRequiredService<IVirtualFileSystem>();
 
-        // ── Demo 1 - Basic read / write / delete ──────────────────────────────
+        // -- Demo 1 - Basic read / write / delete ------------------------------
         Section("1 · Basic read / write / delete");
 
         await WriteText(vfs, "/mem/hello.txt", "Hello, VFS!");
@@ -48,7 +48,7 @@ internal static class BasicDemo
         var cfg = await vfs.RetrieveAsync<dynamic>("/mem/config.json");
         Pass($"SendAsync / RetrieveAsync: Host = {cfg?.GetProperty("Host")}");
 
-        // ── Demo 2 - Path aliases ─────────────────────────────────────────────
+        // -- Demo 2 - Path aliases ---------------------------------------------
         Section("2 · Path aliases  (/docs → /mem/documents)");
 
         // Write to the real path, read via alias
@@ -65,7 +65,7 @@ internal static class BasicDemo
         Pass($"Direct → IsSymlink: {directInfo?.IsSymlink}  (expected: False)");
         Pass($"Alias  → IsSymlink: {aliasInfo?.IsSymlink}   (expected: False)");
 
-        // ── Demo 3 - Node-level symlinks ──────────────────────────────────────
+        // -- Demo 3 - Node-level symlinks --------------------------------------
         Section("3 · Node-level symlinks  (SymlinkMiddleware)");
 
         // Write actual content at the real path
@@ -91,7 +91,7 @@ internal static class BasicDemo
         await vfs.DeleteAsync("/mem/logo.png.lnk");
         Pass($"Target still exists after pointer deleted: {await vfs.ExistsAsync("/mem/assets/logo.png")}");
 
-        // ── Demo 4 - Hard-link deduplication (IDeduplicatingNode) ──────────────
+        // -- Demo 4 - Hard-link deduplication (IDeduplicatingNode) --------------
         Section("4 · Hard-link deduplication  (IDeduplicatingNode)");
 
         const string logo = "<binary: company logo bytes>";

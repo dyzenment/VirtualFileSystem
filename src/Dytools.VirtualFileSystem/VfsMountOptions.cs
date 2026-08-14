@@ -8,9 +8,14 @@ public sealed class VfsMountOptions
 {
     private readonly Dictionary<Type, object> _extensions = new();
 
-    // Selects a keyed DI registration for a node's dependency when more than one is registered
-    // (set via UseServiceKey). Null resolves the default (unkeyed) registration.
-    public object? ServiceKey { get; set; }
+    // Selects a keyed IVfsCatalog registration when a catalog-backed node (dedupe, SharePoint
+    // cache, …) has more than one to choose from (set via UseCatalogServiceKey). Named explicitly
+    // so it isn't confused with keying the node's own service. Null resolves the default catalog.
+    public object? CatalogServiceKey { get; set; }
+
+    // Isolates this mount within a shared, partition-capable catalog (set via UseCatalogPartition).
+    // Null means the catalog's default (un-partitioned) view.
+    public string? CatalogPartitionKey { get; set; }
 
     // Stash a typed options object (called by a node's Use... extension).
     public VfsMountOptions Set<T>(T extension) where T : class
@@ -32,10 +37,18 @@ public sealed class VfsMountOptions
 
 public static class VfsMountOptionsExtensions
 {
-    // Selects which keyed registration of a node's dependency to resolve at activation.
-    public static VfsMountOptions UseServiceKey(this VfsMountOptions options, object serviceKey)
+    // Selects which keyed IVfsCatalog registration a catalog-backed node resolves at activation.
+    public static VfsMountOptions UseCatalogServiceKey(this VfsMountOptions options, object serviceKey)
     {
-        options.ServiceKey = serviceKey;
+        options.CatalogServiceKey = serviceKey;
+        return options;
+    }
+
+    // Isolates this mount within a shared, partition-capable catalog (IPartitionedVfsCatalog).
+    // Used by any catalog-backed node (dedupe, SharePoint cache, …).
+    public static VfsMountOptions UseCatalogPartition(this VfsMountOptions options, string partitionKey)
+    {
+        options.CatalogPartitionKey = partitionKey;
         return options;
     }
 }

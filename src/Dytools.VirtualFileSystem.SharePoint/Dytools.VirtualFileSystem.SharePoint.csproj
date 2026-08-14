@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Dytools.VirtualFileSystem.Nodes.SharePoint</RootNamespace>
+    <AssemblyName>Dytools.VirtualFileSystem.SharePoint</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet package metadata -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Dytools.VirtualFileSystem.SharePoint</PackageId>
+    <Title>Dytools Virtual File System - SharePoint / OneDrive provider</Title>
+    <Description>SharePoint and OneDrive (Microsoft Graph) storage node for Dytools.VirtualFileSystem. Mount a document library under a VFS path and read, write, list, and delete items through the unified virtual filesystem API, plus a delta change feed via IChangeFeed. Talks to Graph over raw HttpClient - you supply the access token.</Description>
+    <PackageTags>vfs;virtual-filesystem;sharepoint;onedrive;microsoft-graph;storage;streams</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Dytools.VirtualFileSystem\Dytools.VirtualFileSystem.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- No SDK dependency: talks to Microsoft Graph over raw HttpClient. System.Net.Http.Json is
+       part of the shared framework. Bring your own access token via ISharePointTokenProvider. -->
+
+</Project>

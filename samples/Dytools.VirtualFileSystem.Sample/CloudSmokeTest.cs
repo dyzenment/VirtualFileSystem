@@ -7,15 +7,17 @@ using Microsoft.Extensions.DependencyInjection;
 using Dytools.VirtualFileSystem.Extensions;
 using Dytools.VirtualFileSystem.Nodes.S3;
 using Dytools.VirtualFileSystem.Nodes.Azure;
+using Dytools.VirtualFileSystem.Nodes.SharePoint;
 
 namespace Dytools.VirtualFileSystem.Sample;
 
 // Opt-in real-world smoke test for the cloud provider packages. Runs a full
 // write -> exists -> read -> info -> list -> copy -> (append) -> delete roundtrip
-// through IVirtualFileSystem against a LIVE S3 bucket or Azure Blob container.
+// through IVirtualFileSystem against a LIVE S3 bucket, Azure Blob container, or SharePoint drive.
 //
 //   dotnet run --project samples/Dytools.VirtualFileSystem.Sample -- s3
 //   dotnet run --project samples/Dytools.VirtualFileSystem.Sample -- azure
+//   dotnet run --project samples/Dytools.VirtualFileSystem.Sample -- sharepoint
 //
 // Configuration is read from environment variables (preferred) or prompted
 // interactively. Nothing is hard-coded and no credentials are stored.
@@ -25,6 +27,8 @@ namespace Dytools.VirtualFileSystem.Sample;
 //                 VFS_S3_SECRET_KEY (omit keys to use the AWS default credential chain).
 // Azure env vars: VFS_AZURE_CONNECTION_STRING (required; 'UseDevelopmentStorage=true'
 //                 for Azurite), VFS_AZURE_CONTAINER (required), VFS_AZURE_PREFIX.
+// SharePoint:     VFS_SP_TOKEN (required; a current Graph bearer token), VFS_SP_DRIVE_ID
+//                 (required; from /sites/{id}/drives or /me/drive), VFS_SP_PREFIX (optional folder).
 internal static class CloudSmokeTest
 {
     public static async Task RunAsync(string provider)
@@ -33,9 +37,10 @@ internal static class CloudSmokeTest
         {
             switch (provider.ToLowerInvariant())
             {
-                case "s3":    await RunS3Async();    break;
-                case "azure": await RunAzureAsync(); break;
-                default:      Console.WriteLine($"Unknown provider '{provider}'. Use 's3' or 'azure'."); break;
+                case "s3":         await RunS3Async();         break;
+                case "azure":      await RunAzureAsync();      break;
+                case "sharepoint": await RunSharePointAsync(); break;
+                default:           Console.WriteLine($"Unknown provider '{provider}'. Use 's3', 'azure', or 'sharepoint'."); break;
             }
         }
         catch (Exception ex)
@@ -48,7 +53,7 @@ internal static class CloudSmokeTest
 
     private static async Task RunS3Async()
     {
-        Console.WriteLine("── S3 smoke test ──");
+        Console.WriteLine("-- S3 smoke test --");
         var bucket     = Ask("Bucket name", "VFS_S3_BUCKET");
         var prefix     = AskOptional("Key prefix (optional)", "VFS_S3_PREFIX");
         var serviceUrl = AskOptional("Service URL (blank for real AWS; set for MinIO/LocalStack)", "VFS_S3_SERVICE_URL");
@@ -82,7 +87,7 @@ internal static class CloudSmokeTest
 
     private static async Task RunAzureAsync()
     {
-        Console.WriteLine("── Azure Blob smoke test ──");
+        Console.WriteLine("-- Azure Blob smoke test --");
         var connStr   = Ask("Connection string (or 'UseDevelopmentStorage=true' for Azurite)", "VFS_AZURE_CONNECTION_STRING");
         var container = Ask("Container name", "VFS_AZURE_CONTAINER");
         var prefix    = AskOptional("Path prefix (optional)", "VFS_AZURE_PREFIX");
@@ -98,6 +103,47 @@ internal static class CloudSmokeTest
                 .MountSingleton<AzureBlobNode>("/az", o => o.UseAzureBlob(location));
 
         await RunRoundtripAsync(services, "/az", appendSupported: true);
+    }
+
+    private static async Task RunSharePointAsync()
+    {
+        Console.WriteLine("-- SharePoint smoke test --");
+        var token   = Ask("Graph access token", "VFS_SP_TOKEN");
+        var driveId = Ask("Drive id", "VFS_SP_DRIVE_ID");
+        var prefix  = AskOptional("Root folder within the drive (optional)", "VFS_SP_PREFIX");
+
+        var services = new ServiceCollection();
+        services.AddSingleton<ISharePointTokenProvider>(new StaticTokenProvider(token));
+        services.AddVirtualFileSystem()
+                .MountSingleton<SharePointNode>("/sp",
+                    o => o.UseSharePointDrive(driveId, string.IsNullOrWhiteSpace(prefix) ? null : prefix));
+
+        // Standard roundtrip (append is unsupported on SharePoint, like S3).
+        await RunRoundtripAsync(services, "/sp", appendSupported: false);
+
+        // Delta capability - specific to SharePoint.
+        var sp = services.BuildServiceProvider();
+        sp.InitializeVirtualFileSystem();
+        await using var vfs = sp.GetRequiredService<IVirtualFileSystem>();
+
+        Console.WriteLine();
+        await Step("delta change feed", async () =>
+        {
+            var feed = vfs.GetCapability<ISharePointChangeFeed>("/sp")
+                       ?? throw new Exception("ISharePointChangeFeed capability not available");
+            var batch = await feed.GetChangesAsync(null);
+            Console.Write($"{batch.Changes.Count} change(s), cursor {(string.IsNullOrEmpty(batch.Cursor) ? "none" : "returned")} ");
+        });
+        Console.WriteLine();
+        Console.WriteLine("  ✓ SharePoint smoke passed.");
+    }
+
+    // Returns the token from the environment for the smoke test. A real app implements
+    // ISharePointTokenProvider over its own credential system (which owns refresh).
+    private sealed class StaticTokenProvider(string token) : ISharePointTokenProvider
+    {
+        public ValueTask<string> GetAccessTokenAsync(CancellationToken ct = default)
+            => ValueTask.FromResult(token);
     }
 
     // write -> exists -> read -> info -> list -> copy -> append -> delete.
