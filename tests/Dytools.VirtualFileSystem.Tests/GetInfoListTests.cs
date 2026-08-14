@@ -82,7 +82,7 @@ public sealed class GetInfoListTests
     }
 
     [Fact]
-    public async Task List_ExcludesNestedPaths()
+    public async Task List_ReturnsImmediateChildrenOnly()
     {
         var vfs = VfsFactory.CreateDual();
         await VfsFactory.WriteTextAsync(vfs, "/a/dir/sub/nested.txt", "deep");
@@ -92,9 +92,45 @@ public sealed class GetInfoListTests
         await foreach (var path in vfs.ListAsync("/a/dir"))
             paths.Add(path);
 
+        // Immediate children: the direct file and the subdirectory - but not the deeper file.
         Assert.Contains("/a/dir/direct.txt", paths);
+        Assert.Contains("/a/dir/sub",        paths);
         Assert.DoesNotContain("/a/dir/sub/nested.txt", paths);
-        Assert.Single(paths);
+        Assert.Equal(2, paths.Count);
+    }
+
+    [Fact]
+    public async Task List_Recursive_ReturnsWholeSubtree()
+    {
+        var vfs = VfsFactory.CreateDual();
+        await VfsFactory.WriteTextAsync(vfs, "/a/dir/sub/nested.txt", "deep");
+        await VfsFactory.WriteTextAsync(vfs, "/a/dir/direct.txt",     "shallow");
+
+        var paths = new List<string>();
+        await foreach (var path in vfs.ListAsync("/a/dir", new VfsListOptions { Recurse = true }))
+            paths.Add(path);
+
+        Assert.Contains("/a/dir/direct.txt",     paths);
+        Assert.Contains("/a/dir/sub",            paths);
+        Assert.Contains("/a/dir/sub/nested.txt", paths);
+    }
+
+    [Fact]
+    public async Task List_SearchPattern_FiltersByGlob()
+    {
+        var vfs = VfsFactory.CreateDual();
+        await VfsFactory.WriteTextAsync(vfs, "/a/docs/report.pdf", "a");
+        await VfsFactory.WriteTextAsync(vfs, "/a/docs/notes.txt",  "b");
+        await VfsFactory.WriteTextAsync(vfs, "/a/docs/summary.pdf", "c");
+
+        var paths = new List<string>();
+        await foreach (var path in vfs.ListAsync("/a/docs", new VfsListOptions { SearchPattern = "*.pdf" }))
+            paths.Add(path);
+
+        Assert.Contains("/a/docs/report.pdf",  paths);
+        Assert.Contains("/a/docs/summary.pdf", paths);
+        Assert.DoesNotContain("/a/docs/notes.txt", paths);
+        Assert.Equal(2, paths.Count);
     }
 
     [Fact]

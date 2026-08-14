@@ -98,7 +98,8 @@ internal sealed class VfsPipeline
         // List
         {
             Func<VfsContext, CancellationToken, IAsyncEnumerable<VfsNodeInfo>> chain =
-                static (ctx, ct) => ctx.ResolvedNode.ListAsync(ctx.BuildNodeRequest(), ct);
+                static (ctx, ct) => ctx.ResolvedNode.ListAsync(
+                    ctx.BuildNodeRequest(), ctx.ListOptions ?? VfsListOptions.Default, ct);
             for (var i = mw.Count - 1; i >= 0; i--)
             { var m = mw[i]; var next = chain; chain = (ctx, ct) => m.InvokeListAsync(ctx, next, ct); }
             _listChain = chain;
@@ -134,8 +135,11 @@ internal sealed class VfsPipeline
     public Task<VfsNodeInfo?> ExecuteGetInfoAsync(VfsContext ctx, CancellationToken ct)
         => _getInfoChain(ctx, ct);
 
-    public IAsyncEnumerable<VfsNodeInfo> ExecuteListAsync(VfsContext ctx, CancellationToken ct)
-        => _listChain(ctx, ct);
+    public IAsyncEnumerable<VfsNodeInfo> ExecuteListAsync(VfsContext ctx, VfsListOptions options, CancellationToken ct)
+    {
+        ctx.ListOptions = options;
+        return _listChain(ctx, ct);
+    }
 
     // -- Pipeline terminals for Copy and Move ----------------------------------
     // Same-node: let the node decide (may be native or stream fallback).

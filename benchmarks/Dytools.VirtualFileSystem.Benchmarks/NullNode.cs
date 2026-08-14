@@ -52,7 +52,7 @@ internal sealed class NullNode : VfsNodeBase
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
         => Task.CompletedTask;
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
         yield break;

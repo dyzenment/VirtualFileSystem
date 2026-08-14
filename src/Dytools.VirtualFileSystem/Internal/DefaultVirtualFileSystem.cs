@@ -101,19 +101,25 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         return info is null ? null : Enrich(info, ctx);
     }
 
+    public IAsyncEnumerable<string> ListAsync(string path, CancellationToken ct = default)
+        => ListAsync(path, VfsListOptions.Default, ct);
+
     public async IAsyncEnumerable<string> ListAsync(
-        string path, [EnumeratorCancellation] CancellationToken ct = default)
+        string path, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var ctx = Ctx(path);
-        await foreach (var entry in _pipeline.ExecuteListAsync(ctx, ct))
+        await foreach (var entry in _pipeline.ExecuteListAsync(ctx, options, ct))
             yield return VfsPath.From(ctx.MountPoint, entry.RelativePath).ToString(); // TODO alias respected or always return actual mount point?
     }
 
+    public IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(string path, CancellationToken ct = default)
+        => ListInfoAsync(path, VfsListOptions.Default, ct);
+
     public async IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(
-        string path, [EnumeratorCancellation] CancellationToken ct = default)
+        string path, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var ctx = Ctx(path);
-        await foreach (var nodeInfo in _pipeline.ExecuteListAsync(ctx, ct))
+        await foreach (var nodeInfo in _pipeline.ExecuteListAsync(ctx, options, ct))
         {
             var childCtx = new VfsContext(
                 VfsPath.From(ctx.MountPoint, nodeInfo.RelativePath),

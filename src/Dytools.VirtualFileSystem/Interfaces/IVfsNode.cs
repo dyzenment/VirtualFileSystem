@@ -13,7 +13,8 @@ public interface IVfsNode
     // atomic op) should override this. The default in VfsNodeBase falls back to MoveAsync.
     Task             RenameAsync(VfsNodeRequest src, string newName, CancellationToken ct = default);
 
-    IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest request, CancellationToken ct = default);
+    // options is never null when called through the pipeline (VfsListOptions.Default at minimum).
+    IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest request, VfsListOptions options, CancellationToken ct = default);
     Task<bool>       ExistsAsync(VfsNodeRequest request, CancellationToken ct = default);
     Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default);
 

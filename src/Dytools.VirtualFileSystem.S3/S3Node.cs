@@ -82,7 +82,13 @@ public sealed class S3Node : VfsNodeBase
             DestinationBucket = _bucket, DestinationKey = KeyFor(Rel(dst)),
         }, ct);
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    // S3 keys are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed
+    // down - it forces a full bucket scan.
+    protected override bool IsCaseSensitive => true;
+    protected override bool RequiresFullScan(VfsListOptions options)
+        => !IsPurePrefixPattern(options.SearchPattern);
+
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var listPrefix = ListPrefixFor(Rel(request));
@@ -113,8 +119,8 @@ public sealed class S3Node : VfsNodeBase
                     SizeBytes    = obj.Size,
                     ModifiedAt   = ToUtc(obj.LastModified),
                     Properties   = obj.ETag is null
-                        ? ImmutableDictionary<string, object>.Empty
-                        : ImmutableDictionary<string, object>.Empty.Add("ETag", obj.ETag),
+                        ? ImmutableDictionary<string, string?>.Empty
+                        : ImmutableDictionary<string, string?>.Empty.Add("ETag", obj.ETag),
                 };
             }
 
@@ -134,7 +140,7 @@ public sealed class S3Node : VfsNodeBase
         {
             var meta  = await _s3.GetObjectMetadataAsync(
                 new GetObjectMetadataRequest { BucketName = _bucket, Key = key }, ct);
-            var props = ImmutableDictionary<string, object>.Empty;
+            var props = ImmutableDictionary<string, string?>.Empty;
             if (meta.ETag is not null)               props = props.Add("ETag", meta.ETag);
             if (meta.Headers?.ContentType is { } cty) props = props.Add("ContentType", cty);
 

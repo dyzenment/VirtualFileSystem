@@ -107,7 +107,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         return Task.CompletedTask;
     }
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var relBase = new string(request.Path.PathSpan).TrimEnd('/'); // "" when listing mount root
@@ -124,20 +124,37 @@ public sealed class InMemoryKvNode : VfsNodeBase
         }
         finally { _lock.ExitReadLock(); }
 
+        // Flat store: synthesize a directory entry for the first segment of any deeper key,
+        // so recursion (and directory-kind listings) work over the virtual hierarchy.
+        var seenDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (k, size) in snapshot)
         {
             ct.ThrowIfCancellationRequested();
             var remainder = prefix.Length > 0 ? k[prefix.Length..] : k;
-            if (remainder.Contains('/')) continue; // only direct children
+            var slash     = remainder.IndexOf('/');
 
-            yield return new VfsNodeInfo
+            if (slash < 0)
             {
-                RelativePath = relBase.Length > 0 ? VfsPath.From($"{relBase}/{remainder}") : VfsPath.From(remainder),
-                IsFile       = true,
-                IsDirectory  = false,
-                SizeBytes    = size,
-                ModifiedAt   = DateTimeOffset.UtcNow,
-            };
+                yield return new VfsNodeInfo
+                {
+                    RelativePath = relBase.Length > 0 ? VfsPath.From($"{relBase}/{remainder}") : VfsPath.From(remainder),
+                    IsFile       = true,
+                    IsDirectory  = false,
+                    SizeBytes    = size,
+                    ModifiedAt   = DateTimeOffset.UtcNow,
+                };
+            }
+            else
+            {
+                var dirName = remainder[..slash];
+                if (seenDirs.Add(dirName))
+                    yield return new VfsNodeInfo
+                    {
+                        RelativePath = relBase.Length > 0 ? VfsPath.From($"{relBase}/{dirName}") : VfsPath.From(dirName),
+                        IsFile       = false,
+                        IsDirectory  = true,
+                    };
+            }
         }
     }
 

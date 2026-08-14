@@ -68,6 +68,11 @@ public sealed class VfsContext
     // the chain runs; readable and writable by middleware via ctx.Options.
     public VfsCallOptions Options { get; internal set; }
 
+    // Directory-listing options for a List call (recursion, search pattern, kind, etc.).
+    // Set by VfsPipeline before the list chain runs; middleware may read or rewrite it
+    // (e.g. force IncludeHidden = false, inject a scoping SearchPattern). Null outside a List.
+    public VfsListOptions? ListOptions { get; internal set; }
+
     // Shared bag for within-call middleware communication.
     // Prefer typed extension methods (GetUser/SetUser) over raw access.
     // Allocated lazily - most calls never touch it.

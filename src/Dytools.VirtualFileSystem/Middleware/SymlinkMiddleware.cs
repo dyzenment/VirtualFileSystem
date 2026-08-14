@@ -109,7 +109,7 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
             ctx.Items[VfsContextKeys.SymlinkDepth]   = depth + 1;
             ctx.Items[VfsContextKeys.SymlinkFollowed] = true;
             // Symlink target is a string stored in Properties - wrap at the boundary.
-            ctx.Reroute(VfsPath.From((string)raw!));
+            ctx.Reroute(VfsPath.From(raw!));
             // continue loop - check whether the target is also a symlink
         }
     }

@@ -43,12 +43,18 @@ internal sealed class VfsRerouteNode : VfsNodeBase
     }
 
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
-        VfsNodeRequest req, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        VfsNodeRequest req, VfsListOptions options,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         var (n, r) = Target(req);
-        await foreach (var info in n.ListAsync(r, ct))
+        await foreach (var info in n.ListAsync(r, options, ct))
             yield return info with { RelativePath = Rebase(info.RelativePath) };
     }
+
+    // Reroute forwards the full options-aware ListAsync above; this satisfies the base
+    // primitive and is only reached if something bypasses the override.
+    protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest request, CancellationToken ct)
+        => ListAsync(request, VfsListOptions.Default, ct);
 
     public override T? GetCapability<T>() where T : class
     {

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.IO.Enumeration;
 using System.Runtime.CompilerServices;
 using Dytools.VirtualFileSystem;
 
@@ -74,7 +75,59 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    // Native listing: recursion, search pattern, kind, and hidden filtering all resolve in a
+    // single OS-level enumeration. Attributes/size/timestamps come straight off the walk (no
+    // per-entry re-stat), and the pattern is matched by the runtime's own simple-glob matcher.
+    // The base VfsNodeBase engine (over ListDirectoryAsync) remains the fallback for backends
+    // that can't push these down.
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+        VfsNodeRequest request, VfsListOptions options,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        options ??= VfsListOptions.Default;
+        var physical = Resolve(request);
+        if (!Directory.Exists(physical)) yield break;
+
+        var pattern       = string.IsNullOrEmpty(options.SearchPattern) ? "*" : options.SearchPattern!;
+        var includeHidden = options.IncludeHidden;
+        var kind          = options.Kind;
+
+        var enumOptions = new EnumerationOptions
+        {
+            RecurseSubdirectories = options.Recurse,
+            // Our MaxDepth counts levels below the listed dir (immediate children = 1); .NET's
+            // MaxRecursionDepth counts descents (0 = top directory only). So subtract one.
+            MaxRecursionDepth  = options.MaxDepth is { } md ? Math.Max(0, md - 1) : int.MaxValue,
+            AttributesToSkip   = 0,      // filter hidden in the predicate so recursion still descends
+            IgnoreInaccessible = true,
+        };
+
+        var entries = new FileSystemEnumerable<VfsNodeInfo>(
+            physical,
+            (ref FileSystemEntry e) => BuildInfoFromEntry(ref e),
+            enumOptions)
+        {
+            ShouldIncludePredicate = (ref FileSystemEntry e) =>
+            {
+                var kindOk = e.IsDirectory
+                    ? (kind & VfsEntryKind.Directories) != 0
+                    : (kind & VfsEntryKind.Files) != 0;
+                if (!kindOk) return false;
+                if (!includeHidden && (e.Attributes & FileAttributes.Hidden) != 0) return false;
+                return pattern == "*" || FileSystemName.MatchesSimpleExpression(pattern, e.FileName);
+            },
+        };
+
+        foreach (var info in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return info;
+        }
+    }
+
+    // Single-level primitive: satisfies the base contract and backs any caller that reaches
+    // for it, though LocalFs's own listing goes through the native ListAsync above.
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var physical = Resolve(request);
@@ -86,6 +139,26 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
             var info = BuildInfo(entry, request.Path);
             if (info is not null) yield return info;
         }
+    }
+
+    private VfsNodeInfo BuildInfoFromEntry(ref FileSystemEntry entry)
+    {
+        var props = ImmutableDictionary<string, string?>.Empty;
+        if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+            props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
+
+        return new VfsNodeInfo
+        {
+            RelativePath = BuildRelativePath(entry.ToFullPath()),
+            IsFile       = !entry.IsDirectory,
+            IsDirectory  = entry.IsDirectory,
+            IsHidden     = (entry.Attributes & FileAttributes.Hidden) != 0,
+            SizeBytes    = entry.IsDirectory ? null : entry.Length,
+            CreatedAt    = entry.CreationTimeUtc,
+            ModifiedAt   = entry.LastWriteTimeUtc,
+            AccessedAt   = entry.LastAccessTimeUtc,
+            Properties   = props,
+        };
     }
 
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
@@ -128,9 +201,9 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         if (File.Exists(physical))
         {
             var fi    = new FileInfo(physical);
-            var props = ImmutableDictionary<string, object>.Empty;
+            var props = ImmutableDictionary<string, string?>.Empty;
             if ((fi.Attributes & FileAttributes.ReparsePoint) != 0)
-                props = props.Add(VfsPropertyKeys.PhysicalSymlink, true);
+                props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
 
             return new VfsNodeInfo
             {

@@ -22,7 +22,7 @@ public sealed class LifetimeMountTests
             => Task.CompletedTask;
         public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest r, CancellationToken ct = default)
             => Task.FromResult<VfsNodeInfo?>(null);
-        public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest r, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest r, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
         { await Task.CompletedTask; yield break; }
     }
 

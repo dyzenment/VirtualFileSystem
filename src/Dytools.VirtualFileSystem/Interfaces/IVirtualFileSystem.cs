@@ -30,12 +30,18 @@ public interface IVirtualFileSystem : IAsyncDisposable
     // with correct casing as reported by the node.
     Task<VfsEntryInfo?>            GetInfoAsync(string path, CancellationToken ct = default);
 
-    // ListAsync: names only - lightweight enumeration.
+    // ListAsync: names only - lightweight enumeration of the directory's immediate children.
     IAsyncEnumerable<string>       ListAsync(string path, CancellationToken ct = default);
+
+    // ListAsync with options: recursion, search pattern, kind/hidden filtering, projection.
+    IAsyncEnumerable<string>       ListAsync(string path, VfsListOptions options, CancellationToken ct = default);
 
     // ListInfoAsync: full metadata per entry.
     // Path in each VfsEntryInfo is the full canonical VFS path.
     IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(string path, CancellationToken ct = default);
+
+    // ListInfoAsync with options: recursion, search pattern, kind/hidden filtering, projection.
+    IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(string path, VfsListOptions options, CancellationToken ct = default);
 
     // ── Typed convenience sugar ───────────────────────────────────────────────
     // Default: JSON serialised over a stream.

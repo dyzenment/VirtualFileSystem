@@ -181,8 +181,8 @@ internal sealed class SymlinkAwareInMemoryNode : VfsNodeBase, ISymlinkCapableNod
     public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
         => _inner.DeleteAsync(req, ct);
 
-    public override IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest req, CancellationToken ct = default)
-        => _inner.ListAsync(req, ct);
+    protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest req, CancellationToken ct = default)
+        => _inner.ListAsync(req, VfsListOptions.Default, ct);
 
     public override async Task<VfsNodeInfo?> GetInfoAsync(
         VfsNodeRequest request, CancellationToken ct = default)
@@ -200,7 +200,7 @@ internal sealed class SymlinkAwareInMemoryNode : VfsNodeBase, ISymlinkCapableNod
 
         return info with
         {
-            Properties = ImmutableDictionary<string, object>.Empty
+            Properties = ImmutableDictionary<string, string?>.Empty
                 .Add(VfsPropertyKeys.SymlinkTarget, target.Trim())
         };
     }
@@ -273,12 +273,12 @@ internal sealed class DeduplicatingInMemoryNode : VfsNodeBase, IDeduplicatingNod
             IsFile       = true,
             IsDirectory  = false,
             SizeBytes    = _blobs[id].Length,
-            Properties   = ImmutableDictionary<string, object>.Empty
+            Properties   = ImmutableDictionary<string, string?>.Empty
                                .Add(VfsPropertyKeys.ContentId, id),
         });
     }
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var prefix = new string(req.Path.PathSpan).TrimEnd('/') + "/";

@@ -136,7 +136,13 @@ public sealed class AzureBlobNode : VfsNodeBase
                         .DeleteIfExistsAsync(DeleteSnapshotsOption.IncludeSnapshots, cancellationToken: ct);
     }
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    // Blob names are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed
+    // down - it forces a full container scan.
+    protected override bool IsCaseSensitive => true;
+    protected override bool RequiresFullScan(VfsListOptions options)
+        => !IsPurePrefixPattern(options.SearchPattern);
+
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var rel = Rel(request);
@@ -267,9 +273,9 @@ public sealed class AzureBlobNode : VfsNodeBase
         return i < 0 ? rel : rel[..i];
     }
 
-    private static IReadOnlyDictionary<string, object> BuildProps(string? etag, string? contentType)
+    private static IReadOnlyDictionary<string, string?> BuildProps(string? etag, string? contentType)
     {
-        var props = ImmutableDictionary<string, object>.Empty;
+        var props = ImmutableDictionary<string, string?>.Empty;
         if (!string.IsNullOrEmpty(etag))        props = props.Add("ETag", etag);
         if (!string.IsNullOrEmpty(contentType)) props = props.Add("ContentType", contentType);
         return props;

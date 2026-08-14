@@ -194,10 +194,10 @@ internal sealed class SymlinkTestNode : VfsNodeBase, ISymlinkCapableNode
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
         var key = new string(req.Path.PathSpan);
-        IReadOnlyDictionary<string, object> props = ImmutableDictionary<string, object>.Empty;
+        IReadOnlyDictionary<string, string?> props = ImmutableDictionary<string, string?>.Empty;
 
         if (_symlinks.TryGetValue(key, out var target))
-            props = new Dictionary<string, object> { [VfsPropertyKeys.SymlinkTarget] = target };
+            props = new Dictionary<string, string?> { [VfsPropertyKeys.SymlinkTarget] = target };
         else if (!_data.ContainsKey(key))
             return Task.FromResult<VfsNodeInfo?>(null);
 
@@ -210,7 +210,7 @@ internal sealed class SymlinkTestNode : VfsNodeBase, ISymlinkCapableNode
         });
     }
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
         yield break;
@@ -240,8 +240,8 @@ internal sealed class CallTrackingNode(IVfsNode inner) : VfsNodeBase
         return inner.GetInfoAsync(req, ct);
     }
 
-    public override IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest req, CancellationToken ct = default)
-        => inner.ListAsync(req, ct);
+    protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest req, CancellationToken ct = default)
+        => inner.ListAsync(req, VfsListOptions.Default, ct);
 }
 
 // Minimal middleware implementation backed by a lambda.

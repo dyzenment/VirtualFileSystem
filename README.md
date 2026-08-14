@@ -158,6 +158,45 @@ Everything is driven through the injected `IVirtualFileSystem`:
 | Scoping | `ScopeTo(path)` - a sub-rooted view; `Mount` / `Unmount` (instance-scoped) |
 | Capabilities | `GetCapability<T>(path)` - opt-in extended behaviour a node may expose |
 
+## Listing and search
+
+`ListAsync` (names) and `ListInfoAsync` (full metadata) take an optional `VfsListOptions`
+to recurse, filter by name, or restrict by kind. With no options you get the directory's
+immediate children:
+
+```csharp
+// Immediate children
+await foreach (var path in vfs.ListAsync("/team/reports")) { … }
+
+// Recurse the whole subtree, PDFs only, files (not directories)
+var options = new VfsListOptions
+{
+    Recurse       = true,
+    SearchPattern = "*.pdf",
+    Kind          = VfsEntryKind.Files,
+};
+await foreach (var info in vfs.ListInfoAsync("/team/reports", options)) { … }
+```
+
+| Option | Effect |
+|---|---|
+| `Recurse` / `MaxDepth` | descend subdirectories; `MaxDepth` bounds the levels (immediate children = 1, `null` = unlimited) |
+| `SearchPattern` | leaf-name glob - `*` = any run, `?` = any char (`*.pdf`, `report*`) |
+| `Kind` | `Files`, `Directories`, or `Both` (default) |
+| `IncludeHidden` | include hidden entries (off by default; a no-op where the backend has no hidden concept) |
+| `Detail` | projection hint (`NamesOnly` / `Standard` / `WithMetadata`) - advisory; a backend may honor it to skip extra fetches |
+| `ThrowIfPatternNotSupported` | throw rather than run a filter the backend can't push down (see below) |
+
+**Correct everywhere, cheap where it can be.** Every option always produces correct results.
+A backend honors what it can natively - `LocalFsNode` resolves recursion *and* the search
+pattern in a single OS-level enumeration - and the core supplies the rest by matching
+client-side over a plain listing. So `*.pdf` works over an S3 mount too; it just costs a full
+scan there, because object stores filter only by key prefix. If you'd rather fail than
+silently scan a huge remote store, set `ThrowIfPatternNotSupported = true` and a node that
+can't push the pattern down throws `NotSupportedException` before enumerating (a pure prefix
+like `report*` still passes). Case sensitivity follows the backend - insensitive on local and
+SharePoint, sensitive on S3/Azure - so you never specify it.
+
 ## Concepts
 
 ### Mounts
@@ -183,6 +222,25 @@ Nodes can expose optional behaviour beyond the core contract - e.g. a dedupe nod
 exposes its `IVfsCatalog`. Consumers discover it at a path with
 `vfs.GetCapability<T>(path)`, which returns `null` when the owning node doesn't
 implement it. The core never calls capability interfaces itself.
+
+### Entry metadata
+`GetInfoAsync` / `ListInfoAsync` return a `VfsEntryInfo` - path, kind, size, timestamps,
+`IsHidden` - plus a `Properties` bag for backend-specific extras (`ETag`, `ContentType`,
+content id, …). `Properties` is `string → string?` so it round-trips through any store and
+maps 1:1 onto S3/Azure metadata; read typed values with the accessors in
+`VfsPropertyExtensions`:
+
+```csharp
+var info = await vfs.GetInfoAsync("/archive/report.pdf");
+string? etag  = info!.Properties.GetString("ETag");
+int?    parts = info.Properties.GetInt("partCount");
+var     acl   = info.Properties.GetJson<Acl[]>("acl");   // structured values are JSON-encoded strings
+```
+
+The durable catalog stores the same shape (`CatalogEntry.Properties`), so a caching or
+namespace-wrapping node can persist a backend's metadata and hand it back unchanged. Keep
+scalars flat (`checksum.sha256=…`) and JSON-encode aggregates (`PutJson`/`GetJson`); the core
+never needs to understand the values.
 
 ## Mounting nodes
 
@@ -391,7 +449,10 @@ this library. See each package's README for setup.
 ## Writing a custom node
 
 Derive from `VfsNodeBase` (which provides stream-fallback `Copy`/`Move`) and
-implement the five core operations:
+implement the five core operations. For listing you implement only the single-level
+primitive `ListDirectoryAsync` (immediate children); `VfsNodeBase` composes recursion,
+`SearchPattern`, and kind/hidden filtering over it, so `VfsListOptions` works on your node
+for free:
 
 ```csharp
 public sealed class MyNode : VfsNodeBase
@@ -399,10 +460,17 @@ public sealed class MyNode : VfsNodeBase
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default) { ... }
     public override Task<Stream>  OpenWriteAsync(VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default) { ... }
     public override Task          DeleteAsync(VfsNodeRequest req, CancellationToken ct = default) { ... }
-    public override IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest req, CancellationToken ct = default) { ... }
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default) { ... }
+
+    // Immediate children only - no recursion or filtering; the base engine handles those.
+    protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest req, CancellationToken ct) { ... }
 }
 ```
+
+A backend that can list more efficiently may instead override the full
+`ListAsync(req, options, ct)` to push recursion or the search pattern down natively (as
+`LocalFsNode` does), and declare `RequiresFullScan` / `IsCaseSensitive` to tune the strict
+guard and the matcher. Overriding is optional - the base engine is always a correct fallback.
 
 See [`samples/`](samples/Dytools.VirtualFileSystem.Sample/Program.cs) for a
 runnable demo covering aliases, node-level symlinks, and hard-link deduplication.

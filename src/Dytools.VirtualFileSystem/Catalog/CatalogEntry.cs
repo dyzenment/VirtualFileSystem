@@ -22,5 +22,12 @@ public sealed record CatalogEntry
     public          long?          Size        { get; init; }   // null for directories
     public          DateTimeOffset CreatedAt   { get; init; }
     public          DateTimeOffset ModifiedAt  { get; init; }
+    public          DateTimeOffset? AccessedAt { get; init; }   // null when the backend doesn't track it
     public          string?        ContentType { get; init; }   // optional MIME type
+    public          bool           IsHidden    { get; init; }
+
+    // Extension bag mirroring VfsNodeInfo.Properties: string→string? so it round-trips through
+    // any store (matches Azure/S3 metadata). Structured values are JSON-encoded into the string
+    // by the producer; use the typed accessors in VfsPropertyExtensions to read them.
+    public IReadOnlyDictionary<string, string?>? Properties { get; init; }
 }

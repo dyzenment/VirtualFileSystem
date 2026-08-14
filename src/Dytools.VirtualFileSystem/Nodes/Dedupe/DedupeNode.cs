@@ -226,7 +226,7 @@ public sealed class DedupeNode : VfsNodeBase
         return entry is null ? null : ToNodeInfo(req.Path, entry);
     }
 
-    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
         await foreach (var child in _catalog.ListChildrenAsync(req.Path, ct))
@@ -265,19 +265,24 @@ public sealed class DedupeNode : VfsNodeBase
 
     private static VfsNodeInfo ToNodeInfo(VfsPath relativePath, CatalogEntry e)
     {
-        var props = ImmutableDictionary<string, object>.Empty;
-        if (e.ContentId is not null)   props = props.Add(VfsPropertyKeys.ContentId, e.ContentId);
-        if (e.Hash is not null)        props = props.Add("ContentHash", e.Hash);
-        if (e.ContentType is not null) props = props.Add("ContentType", e.ContentType);
+        // Start from the entry's own persisted bag, then overlay the well-known dedupe keys.
+        var props = e.Properties is null
+            ? ImmutableDictionary<string, string?>.Empty
+            : ImmutableDictionary.CreateRange(e.Properties);
+        if (e.ContentId is not null)   props = props.SetItem(VfsPropertyKeys.ContentId, e.ContentId);
+        if (e.Hash is not null)        props = props.SetItem("ContentHash", e.Hash);
+        if (e.ContentType is not null) props = props.SetItem("ContentType", e.ContentType);
 
         return new VfsNodeInfo
         {
             RelativePath = relativePath,
             IsFile       = !e.IsDirectory,
             IsDirectory  = e.IsDirectory,
+            IsHidden     = e.IsHidden,
             SizeBytes    = e.Size,
             CreatedAt    = e.CreatedAt,
             ModifiedAt   = e.ModifiedAt,
+            AccessedAt   = e.AccessedAt,
             Properties   = props,
         };
     }

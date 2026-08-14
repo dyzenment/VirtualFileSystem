@@ -40,9 +40,11 @@ public sealed record VfsNodeInfo
     public long?           SizeBytes  { get; init; }   // null for directories or unknown
 
     // Node-specific extras. Use VfsPropertyKeys constants for well-known keys.
-    // Examples: VfsPropertyKeys.SymlinkTarget, VfsPropertyKeys.ContentId, "ETag", "ContentType"
-    public IReadOnlyDictionary<string, object> Properties { get; init; }
-        = ImmutableDictionary<string, object>.Empty;
+    // Examples: VfsPropertyKeys.SymlinkTarget, VfsPropertyKeys.ContentId, "ETag", "ContentType".
+    // string→string? for portability (matches Azure/S3 metadata); read typed values via
+    // VfsPropertyExtensions (GetInt/GetBool/GetJson…). Structured values are JSON-encoded strings.
+    public IReadOnlyDictionary<string, string?> Properties { get; init; }
+        = ImmutableDictionary<string, string?>.Empty;
 }
 
 // What the consumer receives from IVirtualFileSystem.GetInfoAsync / ListInfoAsync.
@@ -74,6 +76,7 @@ public sealed record VfsEntryInfo
     public DateTimeOffset? AccessedAt { get; init; }
     public long?           SizeBytes  { get; init; }
 
-    public IReadOnlyDictionary<string, object> Properties { get; init; }
-        = ImmutableDictionary<string, object>.Empty;
+    // string→string? extension bag; read typed values via VfsPropertyExtensions.
+    public IReadOnlyDictionary<string, string?> Properties { get; init; }
+        = ImmutableDictionary<string, string?>.Empty;
 }

@@ -42,7 +42,7 @@ public sealed class DedupeNodeTests
                 : null);
         }
 
-        public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
+        protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
         {
             await Task.CompletedTask;
             yield break;
@@ -166,7 +166,7 @@ public sealed class DedupeNodeTests
         await WriteAsync(node, "dir/sub/c.txt", "c");
 
         var names = new List<string>();
-        await foreach (var info in node.ListAsync(Req("dir")))
+        await foreach (var info in node.ListAsync(Req("dir"), VfsListOptions.Default))
             names.Add(info.RelativePath.ToString());
 
         Assert.Contains("dir/a.txt", names);
