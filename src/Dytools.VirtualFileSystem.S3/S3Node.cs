@@ -21,10 +21,9 @@ namespace Dytools.VirtualFileSystem.Nodes.S3;
 // Native CopyAsync uses S3 CopyObject (server-side, no bytes through the client).
 // Append is not supported - S3 objects are immutable and must be rewritten whole.
 //
-// Usage:
-//   .Mount("/archive", sp => new S3Node(sp.GetRequiredService<IAmazonS3>(), "my-bucket"))
-//   .MountS3("/archive", "my-bucket")                 // convenience extension
-//   .MountS3("/reports", "my-bucket", "reports/2026") // rooted at a key prefix
+// Usage (register an IAmazonS3 in DI, then mount by bucket/prefix):
+//   .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket"))
+//   .MountSingleton<S3Node>("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"))
 public sealed class S3Node : VfsNodeBase
 {
     private readonly IAmazonS3 _s3;
@@ -39,6 +38,10 @@ public sealed class S3Node : VfsNodeBase
             : bucketName;
         _prefix = keyPrefix?.Trim('/') ?? "";
     }
+
+    // Activated by MountSingleton<S3Node> from the configured options + DI client.
+    public S3Node(VfsMountOptions options, IAmazonS3 client)
+        : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix) { }
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {

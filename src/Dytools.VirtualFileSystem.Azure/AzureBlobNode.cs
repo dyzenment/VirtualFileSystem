@@ -10,15 +10,15 @@ namespace Dytools.VirtualFileSystem.Nodes.Azure;
 
 // Mounts Azure Blob Storage as a VFS path, in one of two modes:
 //
-//   Fixed container  — new AzureBlobNode(containerClient, prefix?)
+//   Fixed container  - new AzureBlobNode(containerClient, prefix?)
 //                      the mount-relative path is the blob name, optionally prefixed.
-//   Account-wide     — new AzureBlobNode(blobServiceClient)
+//   Account-wide     - new AzureBlobNode(blobServiceClient)
 //                      the FIRST path segment selects the container, the rest is the blob
 //                      name. Mount "/azure" and address any container: /azure/<container>/<blob>.
 //
 // Azure SDK clients are immutable, thread-safe, and meant to be shared as singletons.
 //
-// Blob storage is a flat namespace with '/' separators, so "folders" are virtual —
+// Blob storage is a flat namespace with '/' separators, so "folders" are virtual -
 // ListAsync uses GetBlobsByHierarchy with a '/' delimiter to surface them as directories
 // (and, in account-wide mode, lists containers at the mount root).
 //
@@ -45,6 +45,23 @@ public sealed class AzureBlobNode : VfsNodeBase
         _prefix  = "";
     }
 
+    // Activated by MountSingleton<AzureBlobNode> from the configured options + DI client.
+    // No container in the options → account-wide mode.
+    public AzureBlobNode(VfsMountOptions options, BlobServiceClient service)
+    {
+        var o = options.Require<AzureBlobOptions>();
+        if (string.IsNullOrWhiteSpace(o.Container))
+        {
+            _service = service ?? throw new ArgumentNullException(nameof(service));
+            _prefix  = "";
+        }
+        else
+        {
+            _container = (service ?? throw new ArgumentNullException(nameof(service))).GetBlobContainerClient(o.Container);
+            _prefix    = o.Prefix?.Trim('/') ?? "";
+        }
+    }
+
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var (container, name) = Locate(Rel(request));
@@ -66,7 +83,7 @@ public sealed class AzureBlobNode : VfsNodeBase
     {
         var (container, name) = Locate(Rel(request));
         if (container is null || name.Length == 0)
-            throw new IOException("Cannot write to a container or the mount root — specify a blob path.");
+            throw new IOException("Cannot write to a container or the mount root - specify a blob path.");
 
         if (mode == VfsWriteMode.Append)
         {

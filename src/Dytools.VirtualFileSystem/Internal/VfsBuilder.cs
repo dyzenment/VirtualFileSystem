@@ -5,29 +5,29 @@ namespace Dytools.VirtualFileSystem.Internal;
 
 internal sealed class VfsOptions
 {
-    // Mount points registered as keyed IVfsNode services (keyed by the path). The
-    // registry builds its prefix table from these; DI owns each node's lifetime.
-    public List<string>                                 MountPaths          { get; } = [];
+    // Mount points registered as keyed IVfsNode services (keyed by the path), with whether
+    // the mount is explicitly internal. The registry builds its prefix table from these.
+    public List<(string Path, bool Internal)>           Mounts              { get; } = [];
+    public List<string>                                 InternalPrefixes    { get; } = [];
     public List<Func<IServiceProvider, IVfsMiddleware>> MiddlewareFactories { get; } = [];
-    public List<(string Alias, string Target)>          Aliases             { get; } = [];
+    public List<(string Alias, string Target, bool Internal)> Aliases       { get; } = [];
 }
 
 internal sealed class VfsBuilder(IServiceCollection services, VfsOptions options) : IVfsBuilder
 {
     // A pre-built node - one instance for the app (singleton).
-    public IVfsBuilder Mount(string path, IVfsNode node)
+    public IVfsBuilder Mount(string path, IVfsNode node, bool isInternal = false)
     {
         services.AddKeyedSingleton<IVfsNode>(path, node);
-        options.MountPaths.Add(path);
+        options.Mounts.Add((path, isInternal));
         return this;
     }
 
-    // A factory - compose by nesting (e.g. new DedupeNode(new LocalFsNode(...), ...)),
-    // and reference other mounts with sp.NodeAt("/other"). Lifetime picks how often the
-    // factory runs and against which scope. Default Transient (rebuilt per operation);
-    // pass Singleton for a stateless/shared node, Scoped to share a request's services.
+    // A factory - reference other mounts with sp.NodeAt("/other"). Lifetime picks how often
+    // the factory runs and against which scope. isInternal hides the mount from direct
+    // consumer access (reachable only via an alias or a reroute).
     public IVfsBuilder Mount(string path, Func<IServiceProvider, IVfsNode> factory,
-                             MountLifetime lifetime = MountLifetime.Transient)
+                             MountLifetime lifetime = MountLifetime.Transient, bool isInternal = false)
     {
         Func<IServiceProvider, object?, IVfsNode> keyed = (sp, _) => factory(sp);
         switch (lifetime)
@@ -36,7 +36,16 @@ internal sealed class VfsBuilder(IServiceCollection services, VfsOptions options
             case MountLifetime.Scoped:    services.AddKeyedScoped<IVfsNode>(path, keyed);    break;
             default:                      services.AddKeyedTransient<IVfsNode>(path, keyed);  break;
         }
-        options.MountPaths.Add(path);
+        options.Mounts.Add((path, isInternal));
+        return this;
+    }
+
+    // Marks a path prefix internal - every mount at or under it is hidden from direct
+    // consumer access (still reachable via an alias or a reroute). The idiomatic pattern is
+    // to put physical mounts under "/dev" and SetInternal("/dev").
+    public IVfsBuilder SetInternal(string pathPrefix)
+    {
+        options.InternalPrefixes.Add(pathPrefix);
         return this;
     }
 
@@ -56,9 +65,11 @@ internal sealed class VfsBuilder(IServiceCollection services, VfsOptions options
     public IVfsBuilder AddRewriter(Func<VfsPath, VfsPath> rewrite)
         => Use(new PathRewriteMiddleware(rewrite));
 
-    public IVfsBuilder Alias(string alias, string target)
+    // A pure path rewrite (no processing). isInternal keeps the alias itself hidden; a
+    // public (non-internal) alias to an internal mount is the sanctioned door to it.
+    public IVfsBuilder Alias(string alias, string target, bool isInternal = false)
     {
-        options.Aliases.Add((alias, target));
+        options.Aliases.Add((alias, target, isInternal));
         return this;
     }
 

@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace Dytools.VirtualFileSystem.Catalog;
 
 // Durable IVfsCatalog that persists the whole namespace as a single JSON document in a
-// backing store (any IVfsNode) — so a dedupe mount works with no external database. Loads
+// backing store (any IVfsNode) - so a dedupe mount works with no external database. Loads
 // once, keeps the namespace in memory, and rewrites the document on every change
 // (atomically: write a temp file, then rename over the target).
 //

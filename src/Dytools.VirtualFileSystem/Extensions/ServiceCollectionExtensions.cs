@@ -31,11 +31,11 @@ public static class ServiceCollectionExtensions
             var registry = new VfsMountRegistry(sp);   // root; keyed nodes fall back to this provider
             var o = sp.GetRequiredService<VfsOptions>();
 
-            foreach (var (alias, target) in o.Aliases)
-                registry.Alias(alias, target);
+            foreach (var (alias, target, isInternal) in o.Aliases)
+                registry.Alias(alias, target, isInternal);
 
-            foreach (var path in o.MountPaths)          // each mount is a keyed IVfsNode service; DI owns the lifetime
-                registry.MountKeyed(path);
+            foreach (var (path, explicitInternal) in o.Mounts)   // each mount is a keyed IVfsNode service; DI owns the lifetime
+                registry.MountKeyed(path, explicitInternal || IsUnderInternalPrefix(path, o.InternalPrefixes));
 
             return registry;
         });
@@ -67,4 +67,13 @@ public static class ServiceCollectionExtensions
     //   app.Services.InitializeVirtualFileSystem();   // forces the registry to build now
     public static void InitializeVirtualFileSystem(this IServiceProvider services)
         => services.GetRequiredService<IVfsMountRegistry>();
+
+    // A mount is internal if its path is at or under any SetInternal(prefix).
+    private static bool IsUnderInternalPrefix(string path, List<string> prefixes)
+    {
+        var key = VfsPath.From(path);
+        foreach (var p in prefixes)
+            if (key.StartsWith(VfsPath.From(p).PathSpan)) return true;
+        return false;
+    }
 }

@@ -26,13 +26,15 @@ services.AddAzureClients(b =>            // from Microsoft.Extensions.Azure
 
 services
     .AddVirtualFileSystem()
-    .MountAzureBlob("/team", "docs")              // whole container
-    .MountAzureBlob("/reports", "docs/reports");  // rooted at a path prefix
+    .MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs"))              // whole container
+    .MountSingleton<AzureBlobNode>("/reports", o => o.UseAzureBlob("docs/reports"));  // rooted at a path prefix
 ```
 
-The location is `"container"` or `"container/path/prefix"` - the first segment is
-the container, the rest an optional path prefix. `MountAzureBlob` resolves the
-registered `BlobServiceClient` from DI. To pass a container client explicitly:
+`UseAzureBlob` takes `"container"` or `"container/path/prefix"` - the first segment is
+the container, the rest an optional path prefix (omit it entirely for account-wide
+mode, where the first path segment selects the container). The `AzureBlobNode`
+resolves the registered `BlobServiceClient` from DI. To pass a container client
+explicitly, use the factory overload:
 
 ```csharp
 .Mount("/team", sp => new AzureBlobNode(

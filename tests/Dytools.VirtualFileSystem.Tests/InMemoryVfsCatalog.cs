@@ -3,7 +3,7 @@ using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Tests;
 
-// In-memory IVfsCatalog for tests. Not shipped in core — production catalogs are durable
+// In-memory IVfsCatalog for tests. Not shipped in core - production catalogs are durable
 // (JsonFileVfsCatalog, or a database-backed IVfsCatalog).
 internal sealed class InMemoryVfsCatalog : IVfsCatalog
 {

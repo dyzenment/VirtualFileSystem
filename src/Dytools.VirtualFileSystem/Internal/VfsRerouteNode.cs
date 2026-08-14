@@ -65,7 +65,7 @@ internal sealed class VfsRerouteNode : VfsNodeBase
         var reqRel  = new string(req.Path.PathSpan);
         var fullStr = reqRel.Length == 0 ? _baseStr : _baseStr + "/" + reqRel;
 
-        var (node, mount, resolved) = _registry.Resolve(VfsPath.From(fullStr), _provider);
+        var (node, mount, resolved) = _registry.Resolve(VfsPath.From(fullStr), _provider, internalAllowed: true);
         return (node, new VfsNodeRequest(Relative(resolved, mount), mount, req.CallContext));
     }
 
@@ -83,8 +83,8 @@ internal sealed class VfsRerouteNode : VfsNodeBase
     private VfsPath Rebase(VfsPath targetRelative)
     {
         _baseRel ??= new string(Relative(
-            _registry.Resolve(VfsPath.From(_baseStr), _provider).ResolvedPath,
-            _registry.Resolve(VfsPath.From(_baseStr), _provider).MountPoint).PathSpan);
+            _registry.Resolve(VfsPath.From(_baseStr), _provider, internalAllowed: true).ResolvedPath,
+            _registry.Resolve(VfsPath.From(_baseStr), _provider, internalAllowed: true).MountPoint).PathSpan);
 
         if (_baseRel.Length == 0) return targetRelative;
         var s = new string(targetRelative.PathSpan);

@@ -24,13 +24,13 @@ services.AddAWSService<IAmazonS3>();   // from AWSSDK.Extensions.NETCore.Setup
 
 services
     .AddVirtualFileSystem()
-    .MountS3("/archive", "my-bucket")                // whole bucket
-    .MountS3("/reports", "my-bucket/reports/2026");  // rooted at a key prefix
+    .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket"))                // whole bucket
+    .MountSingleton<S3Node>("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"));  // rooted at a key prefix
 ```
 
-The location is `"bucket"` or `"bucket/key/prefix"` - the first segment is the
-bucket, the rest an optional key prefix. `MountS3` resolves the registered
-`IAmazonS3` from DI. To pass a client explicitly:
+`UseS3Bucket` takes `"bucket"` or `"bucket/key/prefix"` - the first segment is the
+bucket, the rest an optional key prefix. The `S3Node` resolves the registered
+`IAmazonS3` from DI. To pass a client explicitly, use the factory overload:
 
 ```csharp
 .Mount("/archive", sp => new S3Node(sp.GetRequiredService<IAmazonS3>(), "my-bucket"),

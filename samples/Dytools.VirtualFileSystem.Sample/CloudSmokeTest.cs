@@ -73,8 +73,9 @@ internal static class CloudSmokeTest
 
         var services = new ServiceCollection();
         services.AddSingleton(client);
+        var location = string.IsNullOrWhiteSpace(prefix) ? bucket : $"{bucket}/{prefix}";
         services.AddVirtualFileSystem()
-                .MountS3("/s3", string.IsNullOrWhiteSpace(prefix) ? bucket : $"{bucket}/{prefix}");
+                .MountSingleton<S3Node>("/s3", o => o.UseS3Bucket(location));
 
         await RunRoundtripAsync(services, "/s3", appendSupported: false);
     }
@@ -92,8 +93,9 @@ internal static class CloudSmokeTest
 
         var services = new ServiceCollection();
         services.AddSingleton(blobService);
+        var location = string.IsNullOrWhiteSpace(prefix) ? container : $"{container}/{prefix}";
         services.AddVirtualFileSystem()
-                .MountAzureBlob("/az", string.IsNullOrWhiteSpace(prefix) ? container : $"{container}/{prefix}");
+                .MountSingleton<AzureBlobNode>("/az", o => o.UseAzureBlob(location));
 
         await RunRoundtripAsync(services, "/az", appendSupported: true);
     }

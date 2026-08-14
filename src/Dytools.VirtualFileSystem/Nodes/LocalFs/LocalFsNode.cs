@@ -20,6 +20,9 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 {
     private readonly string _root = Path.GetFullPath(rootPath);
 
+    // Activated by MountSingleton/Scoped/Transient<LocalFsNode> from the configured options.
+    public LocalFsNode(VfsMountOptions options) : this(options.Require<LocalFsOptions>().RootPath) { }
+
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var physical = Resolve(request);

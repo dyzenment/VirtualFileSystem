@@ -117,9 +117,9 @@ var services = new ServiceCollection();
 
 services
     .AddVirtualFileSystem()
-    .Mount("/local", new LocalFsNode(Path.GetTempPath()))
-    .Mount("/mem",   new InMemoryKvNode())
-    .Alias("/docs",  "/mem/documents");        // pure path rewrite, applied before dispatch
+    .MountSingleton<LocalFsNode>("/local", o => o.UseLocalFileSystemPath(Path.GetTempPath()))
+    .MountSingleton<InMemoryKvNode>("/mem")
+    .Alias("/docs", "/mem/documents");         // pure path rewrite, applied before dispatch
 
 var provider = services.BuildServiceProvider();
 provider.InitializeVirtualFileSystem();
@@ -186,27 +186,39 @@ implement it. The core never calls capability interfaces itself.
 
 ## Mounting nodes
 
-A mount binds a node to a path prefix. Two overloads - an instance, or a factory
-with a lifetime - cover every case:
+A mount binds a node to a **single-level** path prefix. The primary form is a
+**typed mount** - name the node type and a lifetime, and configure it through an
+options builder; the node is activated from DI:
 
 ```csharp
-// 1. A pre-built instance - one node for the whole app (singleton).
-.Mount("/mem", new InMemoryKvNode())
+.MountSingleton<InMemoryKvNode>("/mem")                                    // no config
+.MountSingleton<LocalFsNode>("/local", o => o.UseLocalFileSystemPath(@"C:\data"))
+.MountScoped<DedupeNode>("/files", o => o.UseSource("/dev/store"))         // one per request scope
+```
 
-// 2. A factory - build the node from the service provider, with a lifetime.
+`MountSingleton` / `MountScoped` / `MountTransient<TNode>` mirror
+`IServiceCollection`'s `AddSingleton/Scoped/Transient` (see [Lifetimes](#lifetimes)).
+Each node package contributes `Use…` extension methods on the options
+(`UseLocalFileSystemPath`, `UseS3Bucket`, `UseAzureBlob`, `UseSource`, …); a generic
+`UseServiceKey` picks which keyed DI registration the node resolves.
+
+Two lower-level overloads cover the rest:
+
+```csharp
+// A pre-built instance you hold a reference to - one node for the whole app.
+var mem = new InMemoryKvNode();
+.Mount("/mem", mem)
+
+// A factory with full control over construction, plus a lifetime.
 .Mount("/s3", sp => new S3Node(sp.GetRequiredService<IAmazonS3>(), "bucket"),
        MountLifetime.Singleton)
-
-// 3. Resolve a node you registered in DI, by type.
-//    services.AddScoped(sp => new DedupeNode(new LocalFsNode("/data/blobs"),
-//                                            sp.GetRequiredService<IVfsCatalog>()));
-.Mount("/files", sp => sp.GetRequiredService<DedupeNode>(), MountLifetime.Scoped)
 ```
 
 ### Lifetimes
 
-The factory overload takes a `MountLifetime` that decides how often the node is
-built and against which DI scope:
+`MountSingleton/Scoped/Transient<T>` pick the lifetime by name; the factory overload
+takes an explicit `MountLifetime`. It decides how often the node is built and
+against which DI scope:
 
 | Lifetime | Built | Use for |
 |---|---|---|
@@ -222,10 +234,7 @@ built from the **request scope** - so it shares that request's `DbContext`, with
 services.AddScoped<IVfsCatalog, EfVfsCatalog>();          // your EF Core-backed catalog
 
 services.AddVirtualFileSystem()
-    .Mount("/archive",
-        sp => new DedupeNode(new LocalFsNode("/data/blobs"),
-                             sp.GetRequiredService<IVfsCatalog>()),
-        MountLifetime.Scoped);                            // node + catalog per request
+    .MountScoped<DedupeNode>("/archive", o => o.UseSource("/dev/blobs"));   // node + catalog per request
 ```
 
 Resolve `IVirtualFileSystem` from the request (a controller, minimal-API handler,
@@ -233,115 +242,127 @@ or scoped service) and the catalog is the same one the rest of the request uses.
 Outside a request (console, background service) create a scope first and resolve
 `IVirtualFileSystem` from it.
 
-### Composing nodes
+### Flat mounts and internal backings
 
-Nodes are decorators - stack them by nesting constructors in the factory:
+Mounts are **single-level**: a decorator never nests another node inside itself - it
+references another mount **by path**. A `DedupeNode` keeps its blobs in whatever mount
+`UseSource("/dev/store")` points at; an alias re-exposes an existing mount under a
+second prefix. This is the Unix bind/overlay model, and it keeps every backend defined
+in exactly one place.
+
+Backings that exist only to serve a decorator don't need to be publicly addressable.
+Hide them under an internal prefix with `SetInternal`, or mark a single mount
+`isInternal: true`. An internal mount is reachable only through a public **alias** or a
+**decorator** that references it - a direct consumer path is denied:
 
 ```csharp
-.Mount("/files", sp => new DedupeNode(new LocalFsNode("/data/blobs"),
-                                      sp.GetRequiredService<IVfsCatalog>()))
+services
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/dev/store"))          // catalog persists into the backing
+    .AddVirtualFileSystem()
+    .MountSingleton<LocalFsNode>("/dev/store", o => o.UseLocalFileSystemPath("/var/data"))
+    .SetInternal("/dev")                                       // /dev/* not directly addressable
+    .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store"));
+
+// vfs.OpenReadAsync("/files/a.txt")     → works (through the dedupe decorator)
+// vfs.OpenReadAsync("/dev/store/a.txt") → DirectoryNotFoundException (internal)
 ```
 
 ### Reusing a backend with `NodeAt`
 
-To back several decorator mounts with **one** configured backend, reference it by
-path with `sp.NodeAt("/path")` instead of reconstructing it. Here a deduplicating
-mount keeps its blobs in a plain local-disk mount:
+`sp.NodeAt("/path")` returns a lightweight node that forwards to an existing mount, so
+several decorators can share **one** configured backend instead of each reconstructing
+it. `UseSource` resolves its argument this way; you can also call `NodeAt` directly in a
+factory mount. It forwards straight to the target node (skipping the middleware
+pipeline) and is guarded against cyclic references.
+
+### Content-addressable dedup
+
+A `DedupeNode` stores bytes once per unique content (keyed by hash) in its backing store
+and maps logical paths to those blobs through an `IVfsCatalog`. Identical content
+collapses to one blob; editing a path forks it to a new hash, leaving others untouched.
+Copy/Move are catalog-only (no byte movement).
 
 ```csharp
-services
-    // Register a catalog (required — see below). The built-in JSON one persists to a store.
-    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
-    .AddVirtualFileSystem()
-    // Physical storage, configured once.
-    .Mount("/disk", new LocalFsNode("/var/data"))
-    // A deduplicating view whose blobs live under /disk/files, referenced via NodeAt.
-    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"));
+.MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store"))
 ```
 
 Every write to `/files/...` is content-hashed and stored once under
-`/disk/files/.blobs/<hash>`; the path→hash mapping lives in the catalog. Point as
-many mounts at `/disk` (or at an `/azure` / `/s3` mount) as you like - the backend
-is defined in a single place. `NodeAt` forwards straight to the target node
-(skipping the middleware pipeline) and is guarded against cyclic references.
-
-Don't want the blobs on disk to look like hashes? Turn on `ReadableBlobNames` and
-each new blob is stored under the file name that first saved it (with a `-N` suffix
-on collision), while dedup still keys on the content hash:
-
-```csharp
-.MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"),
-    options: new DedupeOptions { ReadableBlobNames = true, FanOut = 0 });
-// "/files/2026/report.pdf" → /disk/files/report.pdf   (a second, different report.pdf → report-2.pdf)
-```
-
-The catalog entry records both: `ContentId` is the storage key (the readable name),
-`Hash` is the content fingerprint used for deduplication.
-
-Reach the dedupe catalog through the capability system:
+`/dev/store/.blobs/<hash>`; the path→hash mapping lives in the catalog. Reach the
+catalog through the capability system:
 
 ```csharp
 var catalog = vfs.GetCapability<IVfsCatalog>("/files");
 ```
 
+Tune the algorithm through the same options:
+
+| Option | Effect |
+|---|---|
+| `UseSource("/dev/store")` | backing mount for blobs (**required**) |
+| `UsePartition("files")` | isolate this mount's namespace within a shared catalog |
+| `UseServiceKey("db")` | pick a keyed `IVfsCatalog` registration |
+| `UseReadableBlobNames()` | store blobs under the file name that first saved them, not the hash |
+| `UseFanOut(0)` | leading-char subfolder fan-out (default 2; 0 = flat) |
+| `UseBlobPrefix(".blobs")` | prefix the blob store lives under |
+| `UseContentHasher(...)` | swap the hash algorithm (default SHA-256) |
+
+`UseReadableBlobNames()` makes on-disk blobs look like real files
+(`/files/2026/report.pdf` → `/dev/store/report.pdf`; a second, different `report.pdf` →
+`report-2.pdf`) while dedup still keys on the content hash. The catalog entry records
+both: `ContentId` is the storage key, `Hash` is the content fingerprint.
+
 ### The dedupe catalog
 
-The catalog is the durable namespace — `path → { contentId, hash, size, timestamps }` —
+The catalog is the durable namespace - `path → { contentId, hash, size, timestamps }` -
 and the source of truth for what a dedupe mount holds (the blob store only keeps hashed
-content). Because losing it orphans every blob, **you register a catalog** — there is no
+content). Because losing it orphans every blob, **you register a catalog** - there is no
 default, and a mount with none resolvable fails at startup.
 
-`MountDeduplicated` resolves its catalog from DI:
+A dedupe mount resolves its catalog from DI - the default `IVfsCatalog`, or a keyed one
+selected with `UseServiceKey`. `IVfsCatalog` speaks `VfsPath` (base + stream/ADS + query),
+not `string` - implementers get the structured path with no parsing; consumers never touch it.
 
-```csharp
-public static IVfsBuilder MountDeduplicated(this IVfsBuilder builder,
-    string mountPoint, Func<IServiceProvider, IVfsNode> inner,
-    string? catalogPartitionKey = null,   // isolate one catalog across several mounts
-    object? catalogServiceKey   = null,   // pick a keyed IVfsCatalog; null = the default one
-    DedupeOptions? options = null, MountLifetime lifetime = MountLifetime.Singleton);
-```
-
-`IVfsCatalog` speaks `VfsPath` (base + stream/ADS + query), not `string` — implementers get
-the structured path with no parsing; load/save consumers never touch it.
-
-**Built-in `JsonFileVfsCatalog`** — durable, zero-dependency, stores the namespace as a JSON
+**Built-in `JsonFileVfsCatalog`** - durable, zero-dependency, stores the namespace as a JSON
 document in a store you give it. Register it with `AddVfsJsonCatalog`; it holds an in-memory
-index, so keep the mount `Singleton` (the default). Great for getting started and small/medium
+index, so keep the mount `Singleton`. Great for getting started and small/medium
 namespaces; each save rewrites the file, so for high write volume implement `IVfsCatalog` over
 a database.
 
 ```csharp
 services
-    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/dev/store"))
     .AddVirtualFileSystem()
-    .Mount("/disk", new LocalFsNode("/var/data"))
-    .MountDeduplicated("/files", sp => sp.NodeAt("/disk/files"));
+    .MountSingleton<LocalFsNode>("/dev/store", o => o.UseLocalFileSystemPath("/var/data"))
+    .SetInternal("/dev")
+    .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store"));
 ```
 
 **One catalog, several mounts.** Catalog keys are mount-relative, so a shared catalog must be
-partitioned or paths collide (`/files/x` vs `/archive/x` are both `x`). Pass a
-`catalogPartitionKey`; the catalog must be an `IPartitionedVfsCatalog` (its `ForPartition(key)`
-returns an isolated view — `JsonFileVfsCatalog` writes one file per partition). Refcounts scope
+partitioned or paths collide (`/files/x` vs `/archive/x` are both `x`). Give each mount a
+`UsePartition(key)`; the catalog must be an `IPartitionedVfsCatalog` (its `ForPartition(key)`
+returns an isolated view - `JsonFileVfsCatalog` writes one file per partition). Refcounts scope
 to the partition too, so GC stays correct:
 
 ```csharp
 services
-    .AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"))
+    .AddVfsJsonCatalog(sp => sp.NodeAt("/dev/store"))
     .AddVirtualFileSystem()
-    .MountDeduplicated("/files",   sp => sp.NodeAt("/disk/files"),   catalogPartitionKey: "files")
-    .MountDeduplicated("/archive", sp => sp.NodeAt("/disk/archive"), catalogPartitionKey: "archive");
+    .MountSingleton<LocalFsNode>("/dev/store", o => o.UseLocalFileSystemPath("/var/data"))
+    .SetInternal("/dev")
+    .MountSingleton<DedupeNode>("/files",   o => o.UseSource("/dev/store").UsePartition("files"))
+    .MountSingleton<DedupeNode>("/archive", o => o.UseSource("/dev/store").UsePartition("archive"));
 ```
 
-**Multiple catalogs.** Register keyed catalogs and select per mount with `catalogServiceKey`:
+**Multiple catalogs.** Register keyed catalogs and select per mount with `UseServiceKey`:
 
 ```csharp
-services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/cat-a"), serviceKey: "a");
-services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/cat-b"), serviceKey: "b");
-// .MountDeduplicated("/files", …, catalogServiceKey: "a")
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/cat-a"), serviceKey: "a");
+services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/cat-b"), serviceKey: "b");
+// .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store").UseServiceKey("a"))
 ```
 
 **Database-backed.** Implement `IVfsCatalog` over your DB (add a partition column and filter
-every query — including reference counts — by it to support `ForPartition`), register it
+every query - including reference counts - by it to support `ForPartition`), register it
 (`Scoped` if it shares the request `DbContext`), and mount as above.
 
 ## Built-in providers
@@ -358,10 +379,10 @@ Both are BCL-only and bundled into the core package.
 Cloud backends are published as their own packages so their SDK dependencies
 stay out of projects that don't use them:
 
-| Package | Backend | Mount helper |
+| Package | Backend | Mount |
 |---|---|---|
-| [`Dytools.VirtualFileSystem.S3`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.S3/) | Amazon S3 (`AWSSDK.S3`) | `.MountS3("/archive", "my-bucket")` |
-| [`Dytools.VirtualFileSystem.Azure`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.Azure/) | Azure Blob Storage (`Azure.Storage.Blobs`) | `.MountAzureBlob("/team", "docs")` |
+| [`Dytools.VirtualFileSystem.S3`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.S3/) | Amazon S3 (`AWSSDK.S3`) | `.MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket"))` |
+| [`Dytools.VirtualFileSystem.Azure`](https://www.nuget.org/packages/Dytools.VirtualFileSystem.Azure/) | Azure Blob Storage (`Azure.Storage.Blobs`) | `.MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs"))` |
 
 Each wraps a caller-supplied, singleton SDK client (`IAmazonS3` /
 `BlobServiceClient`), so credentials stay in your DI configuration and never enter

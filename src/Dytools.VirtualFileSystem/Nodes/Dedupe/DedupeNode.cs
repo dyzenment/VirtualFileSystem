@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
+using Microsoft.Extensions.DependencyInjection;
 using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
@@ -15,7 +16,7 @@ namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 //   var store = new LocalFsNode("/data");
 //   new DedupeNode(store, new JsonFileVfsCatalog(store))   // durable, zero-dependency catalog
 //
-// The catalog is required — it is the durable source of truth for the namespace, so there
+// The catalog is required - it is the durable source of truth for the namespace, so there
 // is deliberately no in-memory default. The inner node is a dedicated blob store; don't mix
 // plain files into it.
 public sealed class DedupeNode : VfsNodeBase
@@ -29,6 +30,51 @@ public sealed class DedupeNode : VfsNodeBase
         _inner   = inner;
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _options = options ?? new DedupeOptions();
+    }
+
+    // Activated by MountSingleton<DedupeNode>. Resolves the backing store
+    // (UseSource, via NodeAt), the catalog (UseServiceKey + UsePartition), and the algorithm
+    // options - all from the configured mount options.
+    public DedupeNode(VfsMountOptions options, IServiceProvider services)
+        : this(ResolveInner(options, services), ResolveCatalog(options, services), ResolveAlgorithm(options)) { }
+
+    private static IVfsNode ResolveInner(VfsMountOptions options, IServiceProvider sp)
+    {
+        var o = options.Require<DedupeMountOptions>();
+        if (string.IsNullOrEmpty(o.Source))
+            throw new InvalidOperationException("A dedupe mount requires a backing store; call UseSource(\"/path\").");
+        return sp.NodeAt(o.Source);
+    }
+
+    private static IVfsCatalog ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
+    {
+        var catalog = options.ServiceKey is null
+            ? sp.GetService<IVfsCatalog>()
+            : sp.GetKeyedService<IVfsCatalog>(options.ServiceKey);
+
+        if (catalog is null)
+            throw new InvalidOperationException(
+                "No IVfsCatalog registered for the dedupe mount. Register one, e.g. "
+                + "services.AddVfsJsonCatalog(sp => sp.NodeAt(\"/path\")).");
+
+        var o = options.Require<DedupeMountOptions>();
+        if (o.PartitionKey is null) return catalog;
+
+        if (catalog is IPartitionedVfsCatalog partitioned) return partitioned.ForPartition(o.PartitionKey);
+        throw new InvalidOperationException(
+            $"The catalog does not support partitioning (key '{o.PartitionKey}'); it must implement {nameof(IPartitionedVfsCatalog)}.");
+    }
+
+    private static DedupeOptions ResolveAlgorithm(VfsMountOptions options)
+    {
+        var o = options.Require<DedupeMountOptions>();
+        return new DedupeOptions
+        {
+            Hasher            = o.Hasher ?? Sha256ContentHasher.Instance,
+            BlobPrefix        = o.BlobPrefix ?? ".blobs",
+            FanOut            = o.FanOut ?? 2,
+            ReadableBlobNames = o.ReadableBlobNames,
+        };
     }
 
     // -- Read ------------------------------------------------------------------

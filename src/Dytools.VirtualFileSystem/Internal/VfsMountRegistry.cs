@@ -40,38 +40,33 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
     private readonly IVfsMountRegistry? _parent;    // set on per-instance child registries
     private readonly IServiceProvider?  _provider;  // root's fallback provider for keyed resolution
 
-    // Root registry (global singleton): keyed mounts resolve against this provider when
-    // no ambient scope is supplied.
     public VfsMountRegistry(IServiceProvider provider) => _provider = provider;
-
-    // Per-instance child registry: instance mounts added via IVirtualFileSystem.Mount,
-    // falling back to the shared root for everything else.
     internal VfsMountRegistry(IVfsMountRegistry parent) => _parent = parent;
 
-    private volatile (VfsPath Key, MountEntry Entry)[] _mounts  = [];
-    private volatile (VfsPath Alias, VfsPath Target)[] _aliases = [];
+    private volatile (VfsPath Key, MountEntry Entry, bool Internal)[] _mounts  = [];
+    private volatile (VfsPath Alias, VfsPath Target, bool Internal)[] _aliases = [];
     private readonly object _writeLock = new();
 
     // -- IVfsMountRegistry -----------------------------------------------------
 
-    // Runtime instance mount (IVirtualFileSystem.Mount / direct registry use).
+    // Runtime instance mount (IVirtualFileSystem.Mount / direct registry use) - public.
     public void Mount(string mountPoint, IVfsNode node)
-        => AddMount(mountPoint, MountEntry.ForInstance(node));
+        => AddMount(mountPoint, MountEntry.ForInstance(node), isInternal: false);
 
-    // Keyed DI mount, driven by the builder at startup. Not on the public interface.
-    internal void MountKeyed(string mountPoint)
-        => AddMount(mountPoint, MountEntry.ForKey(mountPoint));
+    // Keyed DI mount, driven by the builder at startup, with its internal flag.
+    internal void MountKeyed(string mountPoint, bool isInternal)
+        => AddMount(mountPoint, MountEntry.ForKey(mountPoint), isInternal);
 
-    private void AddMount(string mountPoint, MountEntry entry)
+    private void AddMount(string mountPoint, MountEntry entry, bool isInternal)
     {
         var key = VfsPath.From(mountPoint);
         lock (_writeLock)
         {
             var cur  = _mounts;
-            var next = new List<(VfsPath Key, MountEntry Entry)>(cur.Length + 1);
+            var next = new List<(VfsPath Key, MountEntry Entry, bool Internal)>(cur.Length + 1);
             foreach (var e in cur)
                 if (e.Key != key) next.Add(e);
-            next.Add((key, entry));
+            next.Add((key, entry, isInternal));
             next.Sort(static (a, b) => b.Key.Length.CompareTo(a.Key.Length));
             _mounts = next.ToArray();
         }
@@ -83,24 +78,24 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
         lock (_writeLock)
         {
             var cur  = _mounts;
-            var next = new List<(VfsPath Key, MountEntry Entry)>(cur.Length);
+            var next = new List<(VfsPath Key, MountEntry Entry, bool Internal)>(cur.Length);
             foreach (var e in cur)
                 if (e.Key != key) next.Add(e);
             _mounts = next.ToArray();
         }
     }
 
-    public void Alias(string alias, string target)
+    public void Alias(string alias, string target, bool isInternal = false)
     {
         var a = VfsPath.From(alias);
         var t = VfsPath.From(target);
         lock (_writeLock)
         {
             var cur  = _aliases;
-            var next = new List<(VfsPath Alias, VfsPath Target)>(cur.Length + 1);
+            var next = new List<(VfsPath Alias, VfsPath Target, bool Internal)>(cur.Length + 1);
             foreach (var e in cur)
                 if (e.Alias != a) next.Add(e);
-            next.Add((a, t));
+            next.Add((a, t, isInternal));
             _aliases = next.ToArray();
         }
     }
@@ -111,7 +106,7 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
         lock (_writeLock)
         {
             var cur  = _aliases;
-            var next = new List<(VfsPath Alias, VfsPath Target)>(cur.Length);
+            var next = new List<(VfsPath Alias, VfsPath Target, bool Internal)>(cur.Length);
             foreach (var e in cur)
                 if (e.Alias != a) next.Add(e);
             _aliases = next.ToArray();
@@ -121,30 +116,39 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
     // -- Resolve ---------------------------------------------------------------
 
     public (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(
-        VfsPath path, IServiceProvider? serviceProvider = null)
+        VfsPath path, IServiceProvider? serviceProvider = null, bool internalAllowed = false)
     {
         var aliasSnap = _aliases;
-        var expanded  = ExpandAliases(path, aliasSnap, depth: 0);
+        var (expanded, firstAliasPublic) = ExpandAliases(path, aliasSnap, depth: 0);
         var isAliased = expanded is not null;
         var effective = isAliased ? expanded!.Value : path;
 
         var mountSnap = _mounts;
-        VfsPath      matchKey   = default;
-        MountEntry?  matchEntry = null;
+        VfsPath     matchKey      = default;
+        MountEntry? matchEntry    = null;
+        bool        matchInternal = false;
 
-        foreach (var (key, entry) in mountSnap)
+        foreach (var (key, entry, isInternal) in mountSnap)
         {
             if (!effective.StartsWith(key)) continue;
-            matchKey   = key;
-            matchEntry = entry;
+            matchKey      = key;
+            matchEntry    = entry;
+            matchInternal = isInternal;
             break;
         }
 
         if (matchEntry is null)
         {
-            if (_parent is not null) return _parent.Resolve(path, serviceProvider);
+            if (_parent is not null) return _parent.Resolve(path, serviceProvider, internalAllowed);
             throw new DirectoryNotFoundException($"No VFS mount found for path: {path}");
         }
+
+        // Internal enforcement: an internal mount is reachable only when the access is
+        // sanctioned - a reroute (internalAllowed), or through a public (non-internal) alias.
+        if (matchInternal && !internalAllowed && !(isAliased && firstAliasPublic))
+            throw new DirectoryNotFoundException(
+                $"'{path}' resolves to an internal mount and is not directly accessible; " +
+                "reach it via an alias or a decorator node.");
 
         VfsPath resolvedPath;
         if (!isAliased)
@@ -178,23 +182,25 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
 
     // -- Alias expansion -------------------------------------------------------
 
-    private static VfsPath? ExpandAliases(
-        VfsPath path,
-        (VfsPath Alias, VfsPath Target)[] aliases,
-        int depth)
+    // Returns the expanded path (null if no alias matched) and whether the FIRST alias the
+    // consumer's path hit was public - that first hop is the door, so its public-ness decides
+    // whether reaching an internal target is sanctioned.
+    private static (VfsPath? Expanded, bool FirstAliasPublic) ExpandAliases(
+        VfsPath path, (VfsPath Alias, VfsPath Target, bool Internal)[] aliases, int depth)
     {
         if (depth > 20)
             throw new InvalidOperationException(
                 $"VFS alias depth limit exceeded at depth {depth}: {path}");
 
-        foreach (var (alias, target) in aliases)
+        foreach (var (alias, target, isInternal) in aliases)
         {
             if (!path.StartsWith(alias)) continue;
 
-            var expanded = VfsPath.Rebase(path, alias, target);
-            return ExpandAliases(expanded, aliases, depth + 1) ?? expanded;
+            var expanded    = VfsPath.Rebase(path, alias, target);
+            var (deeper, _) = ExpandAliases(expanded, aliases, depth + 1);
+            return (deeper ?? expanded, !isInternal);
         }
 
-        return null;
+        return (null, false);
     }
 }

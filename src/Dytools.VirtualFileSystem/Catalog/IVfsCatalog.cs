@@ -7,7 +7,7 @@ namespace Dytools.VirtualFileSystem.Catalog;
 // for scale.
 //
 // Paths are VfsPath, not string: implementations get the structured, normalized path
-// (base + stream/ADS + query) without parsing. Consumers never touch this interface —
+// (base + stream/ADS + query) without parsing. Consumers never touch this interface -
 // they use IVirtualFileSystem with string paths.
 //
 // Reused by dedupe today and, by design, by future encryption / cache / hard-link
@@ -45,13 +45,13 @@ public interface IVfsCatalog
     IAsyncEnumerable<CatalogEntry> RemoveAsync(VfsPath path, CancellationToken ct = default);
 
     // Re-key a path (and its subtree, if a directory) to a new location. Content and
-    // reference counts are unchanged — a pure namespace move.
+    // reference counts are unchanged - a pure namespace move.
     ValueTask MoveAsync(VfsPath fromPath, VfsPath toPath, CancellationToken ct = default);
 }
 
 // Opt-in capability: a catalog that can hand out an isolated, independently reference-
 // counted view of itself for a partition key. Implement this when one physical catalog
-// backs several mounts — each mount uses ForPartition(mountKey) so their namespaces and
+// backs several mounts - each mount uses ForPartition(mountKey) so their namespaces and
 // GC never collide. Catalogs that don't implement it simply can't be shared that way.
 public interface IPartitionedVfsCatalog : IVfsCatalog
 {
