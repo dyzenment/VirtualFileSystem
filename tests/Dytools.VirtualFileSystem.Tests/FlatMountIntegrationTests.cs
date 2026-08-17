@@ -46,8 +46,8 @@ public sealed class FlatMountIntegrationTests
         var vfs = Build();
         await VfsFactory.WriteTextAsync(vfs, "/files/a.txt", "hello");
 
-        // The blobs really live under /dev/store, but a direct consumer path is denied.
+        // The blobs really live under /dev/store, but the internal backing is denied to direct access.
         await Assert.ThrowsAnyAsync<Exception>(
-            () => VfsFactory.ReadTextAsync(vfs, "/dev/store/.blobs"));
+            () => VfsFactory.ReadTextAsync(vfs, "/dev/store/a.txt"));
     }
 }

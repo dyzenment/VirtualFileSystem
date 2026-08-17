@@ -6,7 +6,6 @@ public sealed class DedupeMountOptions
 {
     public string         Source            { get; set; } = "";   // inner backing path (resolved via NodeAt)
     public IContentHasher? Hasher           { get; set; }
-    public string?        BlobPrefix        { get; set; }
     public int?           FanOut            { get; set; }
     public bool           ReadableBlobNames { get; set; }
 }
@@ -30,9 +29,8 @@ public static class DedupeMountOptionsExtensions
     public static VfsMountOptions UseReadableBlobNames(this VfsMountOptions o, bool enabled = true)
     { Dm(o).ReadableBlobNames = enabled; return o; }
 
-    public static VfsMountOptions UseBlobPrefix(this VfsMountOptions o, string blobPrefix)
-    { Dm(o).BlobPrefix = blobPrefix; return o; }
-
+    // (Blobs are stored at the root of the UseSource path. To nest them under a subfolder, point
+    // UseSource at that subfolder - e.g. UseSource("/dev/store/blobs") - rather than a separate option.)
     public static VfsMountOptions UseFanOut(this VfsMountOptions o, int fanOut)
     { Dm(o).FanOut = fanOut; return o; }
 

@@ -98,7 +98,7 @@ public sealed class VfsPathTests
     public void From_EmptyString_BecomesRoot()
     {
         // Empty string has no leading slash - no segments, no absolute marker.
-        // Normalises to "/" only because the root-clamp applies to absolute-only paths;
+        // Normalizes to "/" only because the root-clamp applies to absolute-only paths;
         // a bare empty input produces an empty (relative) VfsPath.
         // In practice, callers always pass a non-empty path; this just verifies no crash.
         var p = VfsPath.From("");
@@ -332,6 +332,15 @@ public sealed class VfsPathTests
     }
 
     // -- WithOffset - relative-path slice -------------------------------------
+
+    [Fact]
+    public void WithOffset_PathSpanRelativeRootReturn()
+    {
+        var full = VfsPath.From("/local/c/sub");
+        var rel  = full.WithOffset(12);
+        Assert.Equal("", new string(rel.PathSpan));
+        Assert.True(rel.IsRelative);
+    }
 
     [Fact]
     public void WithOffset_PathSpanIsSlicedFromNewStart()
@@ -899,11 +908,14 @@ public sealed class VfsPathTests
     }
 
     [Fact]
-    public void Default_ToString_ReturnsSlash()
+    public void Default_ToString_ReturnsEmpty()
     {
-        // default(VfsPath) has a null _value; ToString falls back to "/".
+        // default(VfsPath) is the empty relative path (empty PathSpan, IsRelative), so ToString
+        // is "" - not "/" (that's the absolute root, VfsPath.From("/")).
         var p = default(VfsPath);
-        Assert.Equal("/", p.ToString());
+        Assert.Equal("", p.ToString());
+        Assert.True(VfsPath.From(p.ToString()).PathSpan.IsEmpty);    // "" round-trips to an empty path
+        Assert.Equal("", VfsPath.From("").ToString());              // consistent with the other empty path
     }
 
     [Fact]
@@ -911,6 +923,18 @@ public sealed class VfsPathTests
     {
         var p = default(VfsPath);
         Assert.Equal(0, p.Length);
+    }
+
+    [Fact]
+    public void Default_Equals_EmptyPath()
+    {
+        var d = default(VfsPath);
+        var e = VfsPath.From("");
+
+        Assert.True(d.Equals(e));                       // the fast-path hash no longer rejects them
+        Assert.True(e.Equals(d));
+        Assert.True(d == e);
+        Assert.Equal(d.GetHashCode(), e.GetHashCode()); // usable interchangeably as dictionary keys
     }
 
     // -- Rebase ----------------------------------------------------------------

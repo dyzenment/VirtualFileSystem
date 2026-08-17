@@ -1,10 +1,11 @@
 using System.Collections.Immutable;
-using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
 using Dytools.VirtualFileSystem;
+using Dytools.VirtualFileSystem.Catalog;
 using Dytools.VirtualFileSystem.Extensions;
 using Dytools.VirtualFileSystem.Middleware;
+using Dytools.VirtualFileSystem.Nodes.Dedupe;
 using Dytools.VirtualFileSystem.Nodes.InMemory;
 
 namespace Dytools.VirtualFileSystem.Sample;
@@ -13,22 +14,25 @@ namespace Dytools.VirtualFileSystem.Sample;
 //   1. Basic read / write / delete / list
 //   2. Path aliases (IsAliased)
 //   3. Node-level symlinks with SymlinkMiddleware (IsSymlink)
-//   4. Hard-link deduplication via IDeduplicatingNode capability
+//   4. Content-addressed deduplication with the real DedupeNode + catalog
 internal static class BasicDemo
 {
     public static async Task RunAsync()
     {
         var services = new ServiceCollection();
-        var dedup    = new DeduplicatingInMemoryNode();
 
         services
+            // The real dedupe stack: a durable JSON catalog persisted into an in-memory backing
+            // store, with DedupeNode content-addressing writes over it (SHA-256, copy-on-write).
+            .AddVfsJsonCatalog(sp => sp.NodeAt("/dev/store"))
             .AddVirtualFileSystem()
             // UseSymlinks(): only checks nodes that implement ISymlinkCapableNode (zero overhead for others).
             // UseSymlinks(typeof(SomeThirdPartyNode)): also check specific types you can't modify.
             .UseSymlinks()
-            .Mount("/mem",   new SymlinkAwareInMemoryNode())  // implements ISymlinkCapableNode → checked
-            .Mount("/dedup", dedup)                           // does not → skipped by SymlinkMiddleware
-            .Alias("/docs",  "/mem/documents");               // /docs → /mem/documents
+            .Mount("/mem", new SymlinkAwareInMemoryNode())            // implements ISymlinkCapableNode → checked
+            .MountSingleton<InMemoryKvNode>("/dev/store")             // physical blob store for /dedup
+            .MountSingleton<DedupeNode>("/dedup", o => o.UseSource("/dev/store/blobs"))  // blobs nested under /blobs
+            .Alias("/docs", "/mem/documents");                       // /docs → /mem/documents
 
         var provider = services.BuildServiceProvider();
         provider.InitializeVirtualFileSystem();
@@ -91,46 +95,46 @@ internal static class BasicDemo
         await vfs.DeleteAsync("/mem/logo.png.lnk");
         Pass($"Target still exists after pointer deleted: {await vfs.ExistsAsync("/mem/assets/logo.png")}");
 
-        // -- Demo 4 - Hard-link deduplication (IDeduplicatingNode) --------------
-        Section("4 · Hard-link deduplication  (IDeduplicatingNode)");
+        // -- Demo 4 - Content-addressed deduplication (real DedupeNode + catalog) --
+        Section("4 · Content-addressed deduplication  (DedupeNode + catalog)");
 
         const string logo = "<binary: company logo bytes>";
 
-        // Write the same content under three different paths
+        // Write the same content under three different paths.
         await WriteText(vfs, "/dedup/emails/1234/logo.png", logo);
         await WriteText(vfs, "/dedup/emails/5678/logo.png", logo);
         await WriteText(vfs, "/dedup/emails/9012/logo.png", logo);
 
-        // Query the capability - available because DeduplicatingInMemoryNode implements it
-        var cap  = vfs.GetCapability<IDeduplicatingNode>("/dedup/emails/1234/logo.png");
-        var id   = await cap!.HardLinks.ResolveContentIdAsync("emails/1234/logo.png");
-        var refs = await cap.HardLinks.GetRefCountAsync(id!);
-        Pass($"Content ID (SHA-256 prefix): {id![..16]}...");
-        Pass($"Refcount after 3 writes:     {refs}  (expected: 3)");
+        // The dedupe node exposes its catalog (the durable path→content map) as a capability.
+        var catalog = vfs.GetCapability<IVfsCatalog>("/dedup")!;
+        var id      = (await catalog.GetAsync(VfsPath.From("emails/1234/logo.png")))!.ContentId!;
+        Pass($"Content ID (SHA-256): {id[..16]}...");
+        Pass($"Refcount after 3 writes:      {await catalog.ReferenceCountAsync(id)}  (expected: 3)");
 
-        Console.WriteLine("  Links sharing this content:");
-        await foreach (var link in cap.HardLinks.GetLinksAsync(id!))
-            Console.WriteLine($"    {link}");
+        // All three paths resolve to the same stored content.
+        var shared = (await catalog.GetAsync(VfsPath.From("emails/5678/logo.png")))!.ContentId == id
+                  && (await catalog.GetAsync(VfsPath.From("emails/9012/logo.png")))!.ContentId == id;
+        Pass($"All three paths share the blob: {shared}  (expected: True)");
 
-        // Verify data is deduplicated: only one blob stored
-        Pass($"Distinct blobs stored: {dedup.BlobCount}  (expected: 1)");
+        // Three files reference exactly one physical blob in the backing store.
+        Pass($"Blobs stored under /dev/store:  {await CountFiles(vfs, "/dev/store/blobs")}  (expected: 1)");
+        Pass($"Files listed under /dedup:      {await CountFiles(vfs, "/dedup")}  (expected: 3)");
 
-        // Delete one reference - blob survives
+        // Delete one reference - the blob survives (still referenced twice).
         await vfs.DeleteAsync("/dedup/emails/1234/logo.png");
-        refs = await cap.HardLinks.GetRefCountAsync(id!);
-        Pass($"Refcount after 1 delete:     {refs}  (expected: 2)");
-        Pass($"Blobs after 1 delete:        {dedup.BlobCount}  (expected: 1)");
+        Pass($"Refcount after 1 delete:      {await catalog.ReferenceCountAsync(id)}  (expected: 2)");
+        Pass($"Blobs after 1 delete:         {await CountFiles(vfs, "/dev/store/blobs")}  (expected: 1)");
 
-        // Delete remaining two - blob is freed
+        // Delete the rest - the last release garbage-collects the blob.
         await vfs.DeleteAsync("/dedup/emails/5678/logo.png");
         await vfs.DeleteAsync("/dedup/emails/9012/logo.png");
-        refs = await cap.HardLinks.GetRefCountAsync(id!);
-        Pass($"Refcount after all deleted:  {refs}  (expected: 0)");
-        Pass($"Blobs after all deleted:     {dedup.BlobCount}  (expected: 0)");
+        Pass($"Refcount after all deleted:   {await catalog.ReferenceCountAsync(id)}  (expected: 0)");
+        Pass($"Blobs after all deleted:      {await CountFiles(vfs, "/dev/store/blobs")}  (expected: 0)");
+        Pass($"Files listed under /dedup:    {await CountFiles(vfs, "/dedup")}  (expected: 0)");
 
-        // InMemoryKvNode does NOT implement IDeduplicatingNode - returns null
-        var noDedup = vfs.GetCapability<IDeduplicatingNode>("/mem/documents/readme.txt");
-        Pass($"InMemoryKvNode IDeduplicatingNode: {noDedup?.ToString() ?? "null (as expected)"}");
+        // InMemoryKvNode does NOT expose a catalog - the capability query returns null.
+        var noCatalog = vfs.GetCapability<IVfsCatalog>("/mem/documents/readme.txt");
+        Pass($"InMemoryKvNode IVfsCatalog: {noCatalog?.ToString() ?? "null (as expected)"}");
     }
 
     // -- Helpers ---------------------------------------------------------------
@@ -147,6 +151,15 @@ internal static class BasicDemo
     {
         await using var stream = await vfs.OpenWriteAsync(path);
         await stream.WriteAsync(Encoding.UTF8.GetBytes(text));
+    }
+
+    // Recursively lists a subtree and counts the files (ignoring the synthesized directories).
+    private static async Task<int> CountFiles(IVirtualFileSystem vfs, string path)
+    {
+        var count = 0;
+        await foreach (var _ in vfs.ListInfoAsync(path, new VfsListOptions { Recurse = true, Kind = VfsEntryKind.Files }))
+            count++;
+        return count;
     }
 
     private static async Task<string> ReadText(IVirtualFileSystem vfs, string path)
@@ -203,169 +216,5 @@ internal sealed class SymlinkAwareInMemoryNode : VfsNodeBase, ISymlinkCapableNod
             Properties = ImmutableDictionary<string, string?>.Empty
                 .Add(VfsPropertyKeys.SymlinkTarget, target.Trim())
         };
-    }
-}
-
-// -----------------------------------------------------------------------------
-// DeduplicatingInMemoryNode
-// Reference implementation of IDeduplicatingNode.
-// Content-addresses writes by SHA-256. Multiple paths can reference the same
-// blob; the blob is freed when the last reference is released on delete.
-// -----------------------------------------------------------------------------
-internal sealed class DeduplicatingInMemoryNode : VfsNodeBase, IDeduplicatingNode
-{
-    private readonly Dictionary<string, byte[]> _blobs = [];   // contentId → bytes
-    private readonly Dictionary<string, string> _index = new(StringComparer.OrdinalIgnoreCase);  // path → contentId
-    private readonly Dictionary<string, int>    _refs  = [];   // contentId → refcount
-
-    private readonly SimpleHardLinkStore _store;
-
-    public DeduplicatingInMemoryNode()
-        => _store = new SimpleHardLinkStore(_blobs, _index, _refs);
-
-    public IHardLinkStore HardLinks => _store;
-
-    // Exposed for demo assertions - not part of IDeduplicatingNode
-    public int BlobCount => _blobs.Count;
-
-    public override Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
-    {
-        var relPath = new string(req.Path.PathSpan);
-        if (!_index.TryGetValue(relPath, out var id)) return Task.FromResult<Stream?>(null);
-        return Task.FromResult<Stream?>(new MemoryStream(_blobs[id], writable: false));
-    }
-
-    public override Task<Stream> OpenWriteAsync(
-        VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
-    {
-        var relPath = new string(req.Path.PathSpan);
-        if (mode == VfsWriteMode.CreateNew && _index.ContainsKey(relPath))
-            throw new IOException($"Key already exists: {relPath}");
-
-        // Release old reference if overwriting
-        if (_index.TryGetValue(relPath, out var oldId))
-            Release(oldId, relPath);
-
-        return Task.FromResult<Stream>(new CommitStream(data =>
-        {
-            var id = Sha256(data);
-            if (!_blobs.ContainsKey(id)) _blobs[id] = data;
-            _index[relPath] = id;
-            _refs[id] = _refs.TryGetValue(id, out var c) ? c + 1 : 1;
-        }));
-    }
-
-    public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
-    {
-        var relPath = new string(req.Path.PathSpan);
-        if (_index.TryGetValue(relPath, out var id))
-            Release(id, relPath);
-        return Task.CompletedTask;
-    }
-
-    public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
-    {
-        var relPath = new string(req.Path.PathSpan);
-        if (!_index.TryGetValue(relPath, out var id)) return Task.FromResult<VfsNodeInfo?>(null);
-        return Task.FromResult<VfsNodeInfo?>(new VfsNodeInfo
-        {
-            RelativePath = req.Path,
-            IsFile       = true,
-            IsDirectory  = false,
-            SizeBytes    = _blobs[id].Length,
-            Properties   = ImmutableDictionary<string, string?>.Empty
-                               .Add(VfsPropertyKeys.ContentId, id),
-        });
-    }
-
-    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
-        VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
-    {
-        var prefix = new string(req.Path.PathSpan).TrimEnd('/') + "/";
-        foreach (var (path, id) in _index)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-            var remainder = path[prefix.Length..];
-            if (remainder.Contains('/')) continue;
-            yield return new VfsNodeInfo
-            {
-                RelativePath = VfsPath.From(path),
-                IsFile       = true,
-                IsDirectory  = false,
-                SizeBytes    = _blobs[id].Length,
-            };
-        }
-    }
-
-    private void Release(string contentId, string path)
-    {
-        _index.Remove(path);
-        if (!_refs.TryGetValue(contentId, out var c)) return;
-        var next = c - 1;
-        if (next <= 0) { _refs.Remove(contentId); _blobs.Remove(contentId); }
-        else           { _refs[contentId] = next; }
-    }
-
-    private static string Sha256(byte[] data)
-        => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant();
-}
-
-// IHardLinkStore backed by the same dictionaries as DeduplicatingInMemoryNode
-internal sealed class SimpleHardLinkStore(
-    Dictionary<string, byte[]> blobs,
-    Dictionary<string, string> index,
-    Dictionary<string, int>    refs) : IHardLinkStore
-{
-    public ValueTask<string?> ResolveContentIdAsync(string relativePath, CancellationToken ct = default)
-        => ValueTask.FromResult(index.TryGetValue(relativePath, out var id) ? id : null);
-
-    public ValueTask<int> AddReferenceAsync(string contentId, string relativePath, CancellationToken ct = default)
-    {
-        index[relativePath] = contentId;
-        refs[contentId] = refs.TryGetValue(contentId, out var c) ? c + 1 : 1;
-        return ValueTask.FromResult(refs[contentId]);
-    }
-
-    public ValueTask<int> ReleaseReferenceAsync(string relativePath, CancellationToken ct = default)
-    {
-        if (!index.Remove(relativePath, out var id)) return ValueTask.FromResult(0);
-        if (!refs.TryGetValue(id, out var c)) return ValueTask.FromResult(0);
-        var next = c - 1;
-        if (next <= 0) { refs.Remove(id); blobs.Remove(id); return ValueTask.FromResult(0); }
-        refs[id] = next;
-        return ValueTask.FromResult(next);
-    }
-
-    public ValueTask<int> GetRefCountAsync(string contentId, CancellationToken ct = default)
-        => ValueTask.FromResult(refs.TryGetValue(contentId, out var c) ? c : 0);
-
-    public async IAsyncEnumerable<string> GetLinksAsync(
-        string contentId, [EnumeratorCancellation] CancellationToken ct = default)
-    {
-        foreach (var (path, id) in index)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (id == contentId) yield return path;
-        }
-        await Task.CompletedTask;
-    }
-}
-
-// Write stream that commits to a callback on dispose
-internal sealed class CommitStream(Action<byte[]> commit) : MemoryStream
-{
-    private bool _committed;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing && !_committed) { _committed = true; commit(ToArray()); }
-        base.Dispose(disposing);
-    }
-
-    public override async ValueTask DisposeAsync()
-    {
-        if (!_committed) { _committed = true; commit(ToArray()); }
-        await base.DisposeAsync();
     }
 }

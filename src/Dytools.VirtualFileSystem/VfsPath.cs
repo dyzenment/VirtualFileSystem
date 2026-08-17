@@ -93,7 +93,10 @@ public readonly struct VfsPath : IEquatable<VfsPath>
         var hashSpan = value is null
             ? ReadOnlySpan<char>.Empty
             : value.AsSpan(start, queryOffset - start); // path + ":stream" if present
-        var h = (long)(uint)string.GetHashCode(hashSpan, comp);
+        // Empty content hashes to 0 so every empty path shares default(VfsPath)'s packed-0 hash -
+        // otherwise the Equals fast-path would reject default vs From(""). Non-empty paths use the
+        // real hash; empty paths are all equal anyway, so this doesn't weaken the filter.
+        var h = hashSpan.IsEmpty ? 0L : (long)(uint)string.GetHashCode(hashSpan, comp);
 
         _packed = ((long)start        << START_SHIFT)
                 | ((long)streamOffset << STREAM_SHIFT)
@@ -315,8 +318,11 @@ public readonly struct VfsPath : IEquatable<VfsPath>
     /// </summary>
     public override string ToString()
     {
+        // default(VfsPath) is the empty relative path (empty PathSpan, IsRelative), so it
+        // stringifies to "" - consistent with the other members and round-tripping through
+        // From(""). The absolute root is VfsPath.From("/"), which has a non-null "/" value.
         var s = Start;
-        return _value is null ? "/" : s == 0 ? _value : new string(_value.AsSpan(s));
+        return _value is null ? "" : s == 0 ? _value : new string(_value.AsSpan(s));
     }
 
     // -- Rebase (alias expansion helper) --------------------------------------

@@ -345,9 +345,9 @@ Copy/Move are catalog-only (no byte movement).
 .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store"))
 ```
 
-Every write to `/files/...` is content-hashed and stored once under
-`/dev/store/.blobs/<hash>`; the path→hash mapping lives in the catalog. Reach the
-catalog through the capability system:
+Every write to `/files/...` is content-hashed and stored once under `/dev/store/<hash>`
+(point `UseSource` at a subfolder like `/dev/store/blobs` to nest them); the path→hash
+mapping lives in the catalog. Reach the catalog through the capability system:
 
 ```csharp
 var catalog = vfs.GetCapability<IVfsCatalog>("/files");
@@ -362,7 +362,6 @@ Tune the algorithm through the same options:
 | `UseCatalogServiceKey("db")` | pick a keyed `IVfsCatalog` registration |
 | `UseReadableBlobNames()` | store blobs under the file name that first saved them, not the hash |
 | `UseFanOut(0)` | leading-char subfolder fan-out (default 2; 0 = flat) |
-| `UseBlobPrefix(".blobs")` | prefix the blob store lives under |
 | `UseContentHasher(...)` | swap the hash algorithm (default SHA-256) |
 
 `UseReadableBlobNames()` makes on-disk blobs look like real files

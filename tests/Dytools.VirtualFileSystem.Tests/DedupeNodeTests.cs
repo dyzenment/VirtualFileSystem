@@ -15,6 +15,7 @@ public sealed class DedupeNodeTests
         private readonly ConcurrentDictionary<string, byte[]> _blobs = new(StringComparer.Ordinal);
 
         public int BlobCount => _blobs.Count;
+        public bool HasKey(string key) => _blobs.ContainsKey(key);
 
         public override Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
         {
@@ -79,6 +80,22 @@ public sealed class DedupeNodeTests
         var node = new DedupeNode(new BlobStoreNode(), new InMemoryVfsCatalog());
         await WriteAsync(node, "docs/hello.txt", "Hello, dedupe!");
         Assert.Equal("Hello, dedupe!", await ReadAsync(node, "docs/hello.txt"));
+    }
+
+    [Fact]
+    public async Task EmptyBlobPrefix_StoresBlobsAtBackingRoot()
+    {
+        var inner   = new BlobStoreNode();
+        var catalog = new InMemoryVfsCatalog();
+        var node    = new DedupeNode(inner, catalog, new DedupeOptions { BlobPrefix = "", FanOut = 0 });
+
+        await WriteAsync(node, "docs/hello.txt", "no prefix");
+        Assert.Equal("no prefix", await ReadAsync(node, "docs/hello.txt"));   // round-trips
+
+        // The blob is keyed by its content id at the backing root - no ".blobs/" wrapper.
+        var id = (await catalog.GetAsync(VfsPath.From("docs/hello.txt")))!.ContentId!;
+        Assert.True(inner.HasKey(id));
+        Assert.False(inner.HasKey($".blobs/{id}"));
     }
 
     [Fact]

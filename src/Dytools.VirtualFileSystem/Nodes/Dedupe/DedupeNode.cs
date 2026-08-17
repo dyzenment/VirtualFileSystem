@@ -67,10 +67,11 @@ public sealed class DedupeNode : VfsNodeBase
     private static DedupeOptions ResolveAlgorithm(VfsMountOptions options)
     {
         var o = options.Require<DedupeMountOptions>();
+        // Blobs live at the root of the UseSource path (BlobPrefix stays ""); nest them by pointing
+        // UseSource at a subfolder instead of a separate prefix option.
         return new DedupeOptions
         {
             Hasher            = o.Hasher ?? Sha256ContentHasher.Instance,
-            BlobPrefix        = o.BlobPrefix ?? ".blobs",
             FanOut            = o.FanOut ?? 2,
             ReadableBlobNames = o.ReadableBlobNames,
         };
@@ -238,9 +239,17 @@ public sealed class DedupeNode : VfsNodeBase
     // -- Internals -------------------------------------------------------------
 
     private string BlobPath(string id)
-        => _options.FanOut > 0 && id.Length > _options.FanOut
-            ? $"{_options.BlobPrefix}/{id[.._options.FanOut]}/{id}"
-            : $"{_options.BlobPrefix}/{id}";
+    {
+        if (string.IsNullOrEmpty(_options.BlobPrefix)) {
+            return _options.FanOut > 0 && id.Length > _options.FanOut
+                ? $"{id[.._options.FanOut]}/{id}"
+                : id;    
+        } else {
+            return _options.FanOut > 0 && id.Length > _options.FanOut
+                ? $"{_options.BlobPrefix}/{id[.._options.FanOut]}/{id}"
+                : $"{_options.BlobPrefix}/{id}";
+        }
+    }
 
     private static VfsNodeRequest BlobReq(string blobPath) => new(VfsPath.From(blobPath));
 
