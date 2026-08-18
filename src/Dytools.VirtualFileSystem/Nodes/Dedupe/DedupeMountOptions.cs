@@ -1,7 +1,9 @@
+using Dytools.VirtualFileSystem.Catalog;
+
 namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 
-// Config carried on the mount options for a DedupeNode. The catalog is selected separately via
-// UseCatalogServiceKey (which keyed IVfsCatalog) and UseCatalogPartition (isolation).
+// Config carried on the mount options for a DedupeNode. The catalog (required) defaults to the sole
+// registration; use UseDedupeCatalog to select a keyed and/or partitioned one.
 public sealed class DedupeMountOptions
 {
     public string         Source            { get; set; } = "";   // inner backing path (resolved via NodeAt)
@@ -36,4 +38,15 @@ public static class DedupeMountOptionsExtensions
 
     public static VfsMountOptions UseContentHasher(this VfsMountOptions o, IContentHasher hasher)
     { Dm(o).Hasher = hasher; return o; }
+
+    // Select which IVfsCatalog backs this dedupe mount when the default registration isn't the one
+    // you want: partition isolates the mount within a shared, partition-capable catalog; serviceKey
+    // picks a keyed registration. Omit either to keep its default. The catalog itself is always
+    // required - this only changes which one is resolved.
+    //
+    //   .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store")
+    //       .UseDedupeCatalog(partition: "files", serviceKey: "db"))
+    public static VfsMountOptions UseDedupeCatalog(
+        this VfsMountOptions o, string? partition = null, object? serviceKey = null)
+        => o.Set(new CatalogSelection { Partition = partition, ServiceKey = serviceKey });
 }

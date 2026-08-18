@@ -47,6 +47,14 @@ public interface IVfsCatalog
     // Re-key a path (and its subtree, if a directory) to a new location. Content and
     // reference counts are unchanged - a pure namespace move.
     ValueTask MoveAsync(VfsPath fromPath, VfsPath toPath, CancellationToken ct = default);
+
+    // Best-effort: record that `path` was read at `accessedAt`, updating its AccessedAt. Approximate
+    // by design - it only sees reads that go through the VFS, not external access - so it's meant for
+    // "recently used", not audit. The default is a no-op, so catalogs that don't track access, or
+    // track it in the backend, simply ignore it; JsonFileVfsCatalog implements it (coalesced, so a
+    // read doesn't rewrite the document more than once per resolution window).
+    ValueTask TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
+        => ValueTask.CompletedTask;
 }
 
 // Opt-in capability: a catalog that can hand out an isolated, independently reference-

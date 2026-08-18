@@ -120,6 +120,17 @@ internal sealed class InMemoryVfsCatalog : IVfsCatalog
         return default;
     }
 
+    public ValueTask TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            var key = Key(path);
+            if (_entries.TryGetValue(key, out var e) && !e.IsDirectory)
+                _entries[key] = e with { AccessedAt = accessedAt };   // immediate; no coalescing in the test double
+        }
+        return default;
+    }
+
     private void EnsureDir(string key, DateTimeOffset ts)
     {
         if (key.Length == 0) return;

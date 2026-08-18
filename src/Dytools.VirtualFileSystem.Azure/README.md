@@ -45,13 +45,13 @@ explicitly, use the factory overload:
 ## Caching catalog (optional)
 
 For faster, cheaper repeated listings, mirror the container's structure into an `IVfsCatalog`
-with `UseCachingCatalog()`:
+with `UseAzureCachingCatalog()`:
 
 ```csharp
 services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));   // or a database-backed catalog for scale
 
 services.AddVirtualFileSystem()
-    .MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs").UseCachingCatalog());
+    .MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs").UseAzureCachingCatalog());
 ```
 
 By default the mirror is **seeded once** (one full listing), then served locally - listings
@@ -62,7 +62,7 @@ immediately; changes made **outside** it aren't seen until you re-sync:
 await vfs.GetCapability<ICatalogMirror>("/team")!.RefreshAsync();
 ```
 
-Select a keyed or partitioned catalog with `UseCatalogServiceKey` / `UseCatalogPartition`, and use
+Select a keyed or partitioned catalog with `UseAzureCachingCatalog(partition: …, serviceKey: …)`, and use
 a database-backed `IVfsCatalog` for large containers. (A future option will let accounts with the
 Azure **Blob change feed** enabled keep the mirror fresh incrementally instead of by re-listing.)
 

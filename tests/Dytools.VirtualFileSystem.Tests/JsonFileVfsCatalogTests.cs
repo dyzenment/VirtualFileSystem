@@ -34,6 +34,50 @@ public sealed class JsonFileVfsCatalogTests
     }
 
     [Fact]
+    public async Task TouchAccessed_UpdatesAccessedAt_AndPersists()
+    {
+        var store = new InMemoryKvNode();
+        var cat   = new JsonFileVfsCatalog(store);
+        await cat.PutFileAsync(File("docs/a.txt", "h1"));
+
+        var t = DateTimeOffset.UnixEpoch.AddDays(10);
+        await cat.TouchAccessedAsync(P("docs/a.txt"), t);
+
+        Assert.Equal(t, (await cat.GetAsync(P("docs/a.txt")))!.AccessedAt);
+        // Persisted: a fresh catalog over the same store sees it.
+        Assert.Equal(t, (await new JsonFileVfsCatalog(store).GetAsync(P("docs/a.txt")))!.AccessedAt);
+    }
+
+    [Fact]
+    public async Task TouchAccessed_CoalescesWithinWindow_ButUpdatesBeyondIt()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutFileAsync(File("docs/a.txt", "h1"));
+
+        var t0 = DateTimeOffset.UnixEpoch.AddDays(10);
+        await cat.TouchAccessedAsync(P("docs/a.txt"), t0);
+        await cat.TouchAccessedAsync(P("docs/a.txt"), t0.AddSeconds(30));   // within the 1-min window → coalesced
+        Assert.Equal(t0, (await cat.GetAsync(P("docs/a.txt")))!.AccessedAt);
+
+        var later = t0.AddMinutes(5);
+        await cat.TouchAccessedAsync(P("docs/a.txt"), later);              // beyond the window → recorded
+        Assert.Equal(later, (await cat.GetAsync(P("docs/a.txt")))!.AccessedAt);
+    }
+
+    [Fact]
+    public async Task TouchAccessed_NoOps_ForMissingOrDirectory()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.EnsureDirectoryAsync(P("docs"), DateTimeOffset.UnixEpoch);
+
+        await cat.TouchAccessedAsync(P("missing.txt"), DateTimeOffset.UnixEpoch.AddDays(1));   // no entry
+        await cat.TouchAccessedAsync(P("docs"), DateTimeOffset.UnixEpoch.AddDays(1));          // a directory
+
+        Assert.Null(await cat.GetAsync(P("missing.txt")));
+        Assert.Null((await cat.GetAsync(P("docs")))!.AccessedAt);
+    }
+
+    [Fact]
     public async Task Persists_AcrossReload_FromSameStore()
     {
         var store = new InMemoryKvNode();

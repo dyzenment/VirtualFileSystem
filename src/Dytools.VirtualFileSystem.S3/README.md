@@ -40,13 +40,13 @@ bucket, the rest an optional key prefix. The `S3Node` resolves the registered
 ## Caching catalog (optional)
 
 For faster, cheaper repeated listings, mirror the bucket's structure into an `IVfsCatalog`
-with `UseCachingCatalog()`:
+with `UseS3CachingCatalog()`:
 
 ```csharp
 services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));   // or a database-backed catalog for scale
 
 services.AddVirtualFileSystem()
-    .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket").UseCachingCatalog());
+    .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket").UseS3CachingCatalog());
 ```
 
 S3 has no cheap delta, so the mirror is **seeded once** (one full listing), then served locally -
@@ -58,7 +58,7 @@ made **through this VFS** are written through immediately (write/delete/copy/mov
 await vfs.GetCapability<ICatalogMirror>("/archive")!.RefreshAsync();
 ```
 
-Select a keyed or partitioned catalog with `UseCatalogServiceKey` / `UseCatalogPartition`. Use a
+Select a keyed or partitioned catalog with `UseS3CachingCatalog(partition: …, serviceKey: …)`. Use a
 database-backed `IVfsCatalog` for large buckets - the built-in JSON catalog rewrites its whole
 file per change and is meant for small/medium namespaces.
 

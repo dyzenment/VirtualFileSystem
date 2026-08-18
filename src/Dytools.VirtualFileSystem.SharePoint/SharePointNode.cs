@@ -19,15 +19,15 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 // recursion work naturally. Append is not supported (items are rewritten whole). Beyond the
 // standard operations it exposes a delta change feed via GetCapability<ISharePointChangeFeed>.
 //
-// Optional caching catalog (UseCachingCatalog): mirror the drive's structure into an IVfsCatalog.
-// Directory listings then serve from the local catalog after a fast incremental delta sync - the
-// fix for SharePoint's notoriously slow listing of large libraries. Reads and mutations still hit
-// SharePoint directly and keep the mirror current.
+// Optional caching catalog (UseSharePointCachingCatalog): mirror the drive's structure into an
+// IVfsCatalog. Directory listings then serve from the local catalog after a fast incremental delta
+// sync - the fix for SharePoint's notoriously slow listing of large libraries. Reads and mutations
+// still hit SharePoint directly and keep the mirror current.
 //
 //   services.AddSingleton<ISharePointTokenProvider, MyTokenBridge>();
 //   services.AddVirtualFileSystem()
 //       .MountSingleton<SharePointNode>("/team",
-//           o => o.UseSharePointDrive("b!AbC…").UseCachingCatalog());
+//           o => o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog());
 public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalogMirror
 {
     private const long SmallUploadLimit = 4L * 1024 * 1024;        // Graph: single-PUT ceiling
@@ -49,8 +49,16 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     // resolves it from a site + library at runtime (UseSharePointSite).
     public SharePointNode(VfsMountOptions options, ISharePointTokenProvider tokens, IServiceProvider services)
         : this(GraphHttp.CreateClient(tokens), Opt(options),
-               CatalogMirror.FromOptions(Opt(options).UseCatalog, options, services),
+               ResolveMirror(options, services),
                services.GetService<ILogger<SharePointNode>>()) { }
+
+    // Caching is opt-in: UseSharePointCachingCatalog stashes a CatalogSelection. Present = mirror the
+    // drive into the selected IVfsCatalog; absent = no caching.
+    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    {
+        var sel = options.Get<CatalogSelection>();
+        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+    }
 
     // Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
     // already attaches auth, targeting a drive by id.
@@ -137,6 +145,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
             return null;
         }
         resp.EnsureSuccessStatusCode();
+        if (_mirror is not null) await _mirror.TouchAccessedAsync(request.Path, DateTimeOffset.UtcNow, ct);
         return await resp.Content.ReadAsStreamAsync(ct);
     }
 

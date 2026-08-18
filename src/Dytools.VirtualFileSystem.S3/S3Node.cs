@@ -45,7 +45,15 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
     // Activated by MountSingleton<S3Node> from the configured options + DI client.
     public S3Node(VfsMountOptions options, IAmazonS3 client, IServiceProvider services)
         : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix,
-               CatalogMirror.FromOptions(options.Require<S3Options>().UseCatalog, options, services)) { }
+               ResolveMirror(options, services)) { }
+
+    // Caching is opt-in: UseS3CachingCatalog stashes a CatalogSelection. Present = mirror the bucket
+    // into the selected IVfsCatalog; absent = no caching.
+    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    {
+        var sel = options.Get<CatalogSelection>();
+        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+    }
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
@@ -53,6 +61,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         {
             var resp = await _s3.GetObjectAsync(
                 new GetObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
+            if (_mirror is not null) await _mirror.TouchAccessedAsync(request.Path, DateTimeOffset.UtcNow, ct);
             return resp.ResponseStream;
         }
         catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)

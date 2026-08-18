@@ -258,8 +258,9 @@ options builder; the node is activated from DI:
 `IServiceCollection`'s `AddSingleton/Scoped/Transient` (see [Lifetimes](#lifetimes)).
 Each node package contributes `Use…` extension methods on the options
 (`UseLocalFileSystemPath`, `UseS3Bucket`, `UseAzureBlob`, `UseSource`, …); catalog-backed nodes
-share `UseCatalogServiceKey` / `UseCatalogPartition` to pick which keyed `IVfsCatalog` and
-partition to use.
+add their own provider-named catalog extension (`UseDedupeCatalog`, `UseS3CachingCatalog`,
+`UseAzureCachingCatalog`, `UseSharePointCachingCatalog`), each taking optional `partition` and
+`serviceKey` arguments to pick which keyed `IVfsCatalog` and partition to use.
 
 Two lower-level overloads cover the rest:
 
@@ -358,8 +359,8 @@ Tune the algorithm through the same options:
 | Option | Effect |
 |---|---|
 | `UseSource("/dev/store")` | backing mount for blobs (**required**) |
-| `UseCatalogPartition("files")` | isolate this mount's namespace within a shared catalog |
-| `UseCatalogServiceKey("db")` | pick a keyed `IVfsCatalog` registration |
+| `UseDedupeCatalog(partition: "files")` | isolate this mount's namespace within a shared catalog |
+| `UseDedupeCatalog(serviceKey: "db")` | pick a keyed `IVfsCatalog` registration |
 | `UseReadableBlobNames()` | store blobs under the file name that first saved them, not the hash |
 | `UseFanOut(0)` | leading-char subfolder fan-out (default 2; 0 = flat) |
 | `UseContentHasher(...)` | swap the hash algorithm (default SHA-256) |
@@ -377,7 +378,7 @@ content). Because losing it orphans every blob, **you register a catalog** - the
 default, and a mount with none resolvable fails at startup.
 
 A dedupe mount resolves its catalog from DI - the default `IVfsCatalog`, or a keyed one
-selected with `UseCatalogServiceKey`. `IVfsCatalog` speaks `VfsPath` (base + stream/ADS + query),
+selected with `UseDedupeCatalog(serviceKey: …)`. `IVfsCatalog` speaks `VfsPath` (base + stream/ADS + query),
 not `string` - implementers get the structured path with no parsing; consumers never touch it.
 
 **Built-in `JsonFileVfsCatalog`** - durable, zero-dependency, stores the namespace as a JSON
@@ -397,7 +398,7 @@ services
 
 **One catalog, several mounts.** Catalog keys are mount-relative, so a shared catalog must be
 partitioned or paths collide (`/files/x` vs `/archive/x` are both `x`). Give each mount a
-`UseCatalogPartition(key)`; the catalog must be an `IPartitionedVfsCatalog` (its `ForPartition(key)`
+`UseDedupeCatalog(partition: key)`; the catalog must be an `IPartitionedVfsCatalog` (its `ForPartition(key)`
 returns an isolated view - `JsonFileVfsCatalog` writes one file per partition). Refcounts scope
 to the partition too, so GC stays correct:
 
@@ -407,16 +408,16 @@ services
     .AddVirtualFileSystem()
     .MountSingleton<LocalFsNode>("/dev/store", o => o.UseLocalFileSystemPath("/var/data"))
     .SetInternal("/dev")
-    .MountSingleton<DedupeNode>("/files",   o => o.UseSource("/dev/store").UseCatalogPartition("files"))
-    .MountSingleton<DedupeNode>("/archive", o => o.UseSource("/dev/store").UseCatalogPartition("archive"));
+    .MountSingleton<DedupeNode>("/files",   o => o.UseSource("/dev/store").UseDedupeCatalog(partition: "files"))
+    .MountSingleton<DedupeNode>("/archive", o => o.UseSource("/dev/store").UseDedupeCatalog(partition: "archive"));
 ```
 
-**Multiple catalogs.** Register keyed catalogs and select per mount with `UseCatalogServiceKey`:
+**Multiple catalogs.** Register keyed catalogs and select per mount with `UseDedupeCatalog(serviceKey: …)`:
 
 ```csharp
 services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/cat-a"), serviceKey: "a");
 services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/cat-b"), serviceKey: "b");
-// .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store").UseCatalogServiceKey("a"))
+// .MountSingleton<DedupeNode>("/files", o => o.UseSource("/dev/store").UseDedupeCatalog(serviceKey: "a"))
 ```
 
 **Database-backed.** Implement `IVfsCatalog` over your DB (add a partition column and filter
@@ -446,7 +447,8 @@ of projects that don't use them:
 S3 and Azure wrap a caller-supplied, singleton SDK client (`IAmazonS3` /
 `BlobServiceClient`); SharePoint takes an `ISharePointTokenProvider` you implement over your
 own credential system. Either way credentials stay in your DI configuration and never enter
-this library. All three support an optional **caching catalog** (`UseCachingCatalog`) that
+this library. All three support an optional **caching catalog** (each via its own
+`UseS3CachingCatalog` / `UseAzureCachingCatalog` / `UseSharePointCachingCatalog`) that
 mirrors the backend's structure into an `IVfsCatalog` for fast local listings, refreshable via
 the `ICatalogMirror` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
 delta, while S3/Azure seed once and write through. See each package's README for setup.

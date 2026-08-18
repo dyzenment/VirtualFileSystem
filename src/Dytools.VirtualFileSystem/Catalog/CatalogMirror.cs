@@ -1,6 +1,5 @@
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace Dytools.VirtualFileSystem.Catalog;
 
@@ -23,29 +22,6 @@ public sealed class CatalogMirror
     public CatalogMirror(IVfsCatalog catalog) => _catalog = catalog;
 
     public IVfsCatalog Catalog => _catalog;
-
-    // Resolves the mount's caching catalog from DI (honoring UseCatalogServiceKey / UseCatalogPartition)
-    // and wraps it, or returns null when caching wasn't opted into. Shared by every catalog-caching node.
-    public static CatalogMirror? FromOptions(bool enabled, VfsMountOptions options, IServiceProvider services)
-    {
-        if (!enabled) return null;
-
-        var catalog = options.CatalogServiceKey is null
-            ? services.GetService<IVfsCatalog>()
-            : services.GetKeyedService<IVfsCatalog>(options.CatalogServiceKey);
-        if (catalog is null)
-            throw new InvalidOperationException(
-                "UseCachingCatalog was set but no IVfsCatalog is registered. Register one, e.g. "
-                + "services.AddVfsJsonCatalog(sp => sp.NodeAt(\"/dev/catalog\")).");
-
-        if (options.CatalogPartitionKey is not null)
-        {
-            if (catalog is IPartitionedVfsCatalog partitioned) catalog = partitioned.ForPartition(options.CatalogPartitionKey);
-            else throw new InvalidOperationException(
-                $"The catalog does not support partitioning (key '{options.CatalogPartitionKey}').");
-        }
-        return new CatalogMirror(catalog);
-    }
 
     // -- Serve -----------------------------------------------------------------
 
@@ -100,6 +76,11 @@ public sealed class CatalogMirror
             await _catalog.MoveAsync(from, to, ct);
     }
 
+    // Best-effort access-time supplement for backends that don't track it: record a read against the
+    // mirror. No-ops for a path that isn't mirrored yet, and the catalog coalesces the write.
+    public Task TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
+        => _catalog.TouchAccessedAsync(path, accessedAt, ct).AsTask();
+
     // Wipe every mirrored entry (keeping the reserved state) - used before a full re-list.
     public async Task ClearAsync(CancellationToken ct = default)
     {
@@ -135,6 +116,7 @@ public sealed class CatalogMirror
         Size        = info.SizeBytes,
         CreatedAt   = info.CreatedAt  ?? default,
         ModifiedAt  = info.ModifiedAt ?? default,
+        AccessedAt  = info.AccessedAt,
         ContentType = info.Properties.GetString("ContentType"),
         Properties  = info.Properties.Count > 0 ? new Dictionary<string, string?>(info.Properties) : null,
     };

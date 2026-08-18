@@ -64,7 +64,15 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
             _container = (service ?? throw new ArgumentNullException(nameof(service))).GetBlobContainerClient(o.Container);
             _prefix    = o.Prefix?.Trim('/') ?? "";
         }
-        _mirror = CatalogMirror.FromOptions(o.UseCatalog, options, services);
+        _mirror = ResolveMirror(options, services);
+    }
+
+    // Caching is opt-in: UseAzureCachingCatalog stashes a CatalogSelection. Present = mirror the
+    // container/account into the selected IVfsCatalog; absent = no caching.
+    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    {
+        var sel = options.Get<CatalogSelection>();
+        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
@@ -75,7 +83,9 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         var blob = container.GetBlobClient(name);
         try
         {
-            return await blob.OpenReadAsync(new BlobOpenReadOptions(allowModifications: false), ct);
+            var stream = await blob.OpenReadAsync(new BlobOpenReadOptions(allowModifications: false), ct);
+            if (_mirror is not null) await _mirror.TouchAccessedAsync(request.Path, DateTimeOffset.UtcNow, ct);
+            return stream;
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {

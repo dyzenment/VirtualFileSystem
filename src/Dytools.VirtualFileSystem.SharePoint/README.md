@@ -115,7 +115,7 @@ services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));   // or a database-
 
 services.AddVirtualFileSystem()
     .MountSingleton<SharePointNode>("/team",
-        o => o.UseSharePointDrive("b!AbC…").UseCachingCatalog());
+        o => o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog());
 ```
 
 The first listing seeds the whole mirror (one full delta); after that each listing is just the
@@ -123,11 +123,11 @@ changes since last time. The delta cursor is stored in the catalog, so the mirro
 incremental across restarts. For libraries with thousands of items use a **database-backed**
 `IVfsCatalog` - the built-in JSON catalog rewrites its whole file on each change and is meant for
 small/medium namespaces. Select a keyed catalog or isolate several mounts within one shared
-catalog using `UseCatalogServiceKey` / `UseCatalogPartition` (the same as the dedupe node):
+catalog using `UseSharePointCachingCatalog(partition: …, serviceKey: …)`:
 
 ```csharp
 .MountSingleton<SharePointNode>("/hr",
-    o => o.UseSharePointDrive("b!XyZ…").UseCachingCatalog().UseCatalogServiceKey("db").UseCatalogPartition("hr"))
+    o => o.UseSharePointDrive("b!XyZ…").UseSharePointCachingCatalog(partition: "hr", serviceKey: "db"))
 ```
 
 ## Delta change feed

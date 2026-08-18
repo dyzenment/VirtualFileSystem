@@ -83,6 +83,23 @@ public sealed class DedupeNodeTests
     }
 
     [Fact]
+    public async Task Read_UpdatesAccessedAt_InCatalog()
+    {
+        var catalog = new InMemoryVfsCatalog();
+        var node    = new DedupeNode(new BlobStoreNode(), catalog);
+        await WriteAsync(node, "docs/hello.txt", "hi");
+
+        Assert.Null((await catalog.GetAsync(VfsPath.From("docs/hello.txt")))!.AccessedAt);   // unread yet
+
+        var before = DateTimeOffset.UtcNow;
+        await ReadAsync(node, "docs/hello.txt");
+
+        var accessed = (await catalog.GetAsync(VfsPath.From("docs/hello.txt")))!.AccessedAt;
+        Assert.NotNull(accessed);
+        Assert.True(accessed >= before);
+    }
+
+    [Fact]
     public async Task EmptyBlobPrefix_StoresBlobsAtBackingRoot()
     {
         var inner   = new BlobStoreNode();

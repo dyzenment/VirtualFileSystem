@@ -27,6 +27,11 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         Converters             = { new VfsPathJsonConverter() },
     };
 
+    // Access-time updates are coalesced to this granularity: a read only rewrites the document when
+    // the last recorded access is older than this. Bounds write amplification (otherwise every read
+    // would rewrite the whole file); AccessedAt is best-effort, so coarse resolution is fine.
+    private static readonly TimeSpan AccessResolution = TimeSpan.FromMinutes(1);
+
     private readonly IVfsNode      _store;
     private readonly string        _path;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -169,6 +174,20 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
                 var newKey = k.Length == from.Length ? to : to + k[from.Length..];
                 _entries[newKey] = e with { Path = VfsPath.From(newKey) };
             }
+            await SaveAsync(ct);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async ValueTask TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await EnsureLoadedAsync(ct);
+            if (!_entries!.TryGetValue(Key(path), out var e) || e.IsDirectory) return;
+            if (e.AccessedAt is { } prev && accessedAt - prev < AccessResolution) return;   // coalesce
+            _entries[Key(path)] = e with { AccessedAt = accessedAt };
             await SaveAsync(ct);
         }
         finally { _gate.Release(); }

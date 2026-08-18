@@ -1,4 +1,5 @@
 using Dytools.VirtualFileSystem;
+using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 
@@ -15,11 +16,6 @@ public sealed class SharePointOptions
     public string? LibraryName { get; set; }   // document library display name; null = the default library
 
     public string? RootPath { get; set; }
-
-    // Caching catalog (opt-in via UseCachingCatalog). When set, the node keeps a mirror of the
-    // namespace in an IVfsCatalog resolved from DI. Which catalog / which partition is selected
-    // with UseCatalogServiceKey / UseCatalogPartition, exactly like the dedupe node.
-    public bool UseCatalog { get; set; }
 }
 
 public static class SharePointMountOptionsExtensions
@@ -64,21 +60,16 @@ public static class SharePointMountOptionsExtensions
         return options;
     }
 
-    // Mirror the drive's structure into an IVfsCatalog (register one, e.g. AddVfsJsonCatalog, or a
-    // database-backed catalog for large libraries). Directory listings then serve from the local
-    // catalog after a fast incremental delta sync - the big speedup for libraries with thousands
-    // of items - while reads and mutations still hit SharePoint directly and keep the catalog fresh.
-    //
-    // Select the catalog and partition with UseCatalogServiceKey / UseCatalogPartition:
+    // Mirror the drive's structure into an IVfsCatalog for fast listings (kept fresh by incremental
+    // delta sync). Calling this opts caching in; partition isolates the mount within a shared,
+    // partition-capable catalog and serviceKey picks a keyed registration (omit either to keep its
+    // default).
     //
     //   services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/catalog"));
-    //   .MountSingleton<SharePointNode>("/team",
-    //       o => o.UseSharePointDrive("b!AbC…").UseCachingCatalog())
+    //   .MountSingleton<SharePointNode>("/team", o => o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog())
     //   .MountSingleton<SharePointNode>("/hr",
-    //       o => o.UseSharePointDrive("b!XyZ…").UseCachingCatalog().UseCatalogServiceKey("db").UseCatalogPartition("hr"))
-    public static VfsMountOptions UseCachingCatalog(this VfsMountOptions options)
-    {
-        Sp(options).UseCatalog = true;
-        return options;
-    }
+    //       o => o.UseSharePointDrive("b!XyZ…").UseSharePointCachingCatalog(partition: "hr", serviceKey: "db"))
+    public static VfsMountOptions UseSharePointCachingCatalog(
+        this VfsMountOptions options, string? partition = null, object? serviceKey = null)
+        => options.Set(new CatalogSelection { Partition = partition, ServiceKey = serviceKey });
 }

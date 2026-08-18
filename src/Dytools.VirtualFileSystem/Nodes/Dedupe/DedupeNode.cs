@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
-using Microsoft.Extensions.DependencyInjection;
 using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
@@ -33,8 +32,8 @@ public sealed class DedupeNode : VfsNodeBase
     }
 
     // Activated by MountSingleton<DedupeNode>. Resolves the backing store
-    // (UseSource, via NodeAt), the catalog (UseCatalogServiceKey + UseCatalogPartition), and the algorithm
-    // options - all from the configured mount options.
+    // (UseSource, via NodeAt), the catalog (default, or selected with UseDedupeCatalog), and the
+    // algorithm options - all from the configured mount options.
     public DedupeNode(VfsMountOptions options, IServiceProvider services)
         : this(ResolveInner(options, services), ResolveCatalog(options, services), ResolveAlgorithm(options)) { }
 
@@ -46,22 +45,12 @@ public sealed class DedupeNode : VfsNodeBase
         return sp.NodeAt(o.Source);
     }
 
+    // The catalog is required. UseDedupeCatalog is optional - it only picks a keyed/partitioned
+    // catalog; without it the default registration is used.
     private static IVfsCatalog ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
     {
-        var catalog = options.CatalogServiceKey is null
-            ? sp.GetService<IVfsCatalog>()
-            : sp.GetKeyedService<IVfsCatalog>(options.CatalogServiceKey);
-
-        if (catalog is null)
-            throw new InvalidOperationException(
-                "No IVfsCatalog registered for the dedupe mount. Register one, e.g. "
-                + "services.AddVfsJsonCatalog(sp => sp.NodeAt(\"/path\")).");
-
-        if (options.CatalogPartitionKey is null) return catalog;
-
-        if (catalog is IPartitionedVfsCatalog partitioned) return partitioned.ForPartition(options.CatalogPartitionKey);
-        throw new InvalidOperationException(
-            $"The catalog does not support partitioning (key '{options.CatalogPartitionKey}'); it must implement {nameof(IPartitionedVfsCatalog)}.");
+        var sel = options.Get<CatalogSelection>();
+        return CatalogResolver.Resolve(sp, sel?.ServiceKey, sel?.Partition);
     }
 
     private static DedupeOptions ResolveAlgorithm(VfsMountOptions options)
@@ -83,6 +72,7 @@ public sealed class DedupeNode : VfsNodeBase
     {
         var entry = await _catalog.GetAsync(req.Path, ct);
         if (entry is null || entry.IsDirectory || entry.ContentId is null) return null;
+        await _catalog.TouchAccessedAsync(req.Path, DateTimeOffset.UtcNow, ct);   // catalog owns the file's metadata
         return await _inner.OpenReadAsync(BlobReq(BlobPath(entry.ContentId)), ct);
     }
 
