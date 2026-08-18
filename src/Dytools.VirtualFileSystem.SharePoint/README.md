@@ -37,11 +37,65 @@ services
     .MountSingleton<SharePointNode>("/reports", o => o.UseSharePointDrive("b!AbC…", "Shared Documents/Reports"));  // rooted at a folder
 ```
 
-Get a drive id from Graph (`/sites/{siteId}/drives`, `/me/drive`, `/groups/{id}/drive`). The
-token must carry the permissions the operations need (e.g. `Files.ReadWrite.All` /
+The token must carry the permissions the operations need (e.g. `Files.ReadWrite.All` /
 `Sites.ReadWrite.All`), app-only or delegated as your system issues it.
 
-To supply your own pre-authed `HttpClient` (e.g. from `IHttpClientFactory` with your own
+### Don't have the drive id? Mount by site + library
+
+The `b!…` drive id is the fiddly part of setup. To skip finding it by hand, mount by **site
+address + library name** and let the node resolve it at runtime:
+
+```csharp
+.MountSingleton<SharePointNode>("/team",
+    o => o.UseSharePointSite("contoso.sharepoint.com:/sites/Marketing", "Documents"))
+```
+
+On first use the node resolves the drive id, **caches it, and logs a Warning** with the exact
+`UseSharePointDrive("b!…")` line to paste back into your config - so you get the id from a real
+run, then switch to `UseSharePointDrive` to skip the two extra Graph calls on every start. If you
+don't switch, it just resolves once per start. (`libraryName` is optional - omit it for the site's
+default library. Add a `rootPath` third argument to root the mount at a folder.)
+
+### Finding a drive id manually
+
+A *drive* is a OneDrive or a SharePoint **document library**. Look its id up from Graph once and
+put it in config. The easiest way is [Graph Explorer](https://developer.microsoft.com/graph/graph-explorer)
+(sign in, run the query, copy the `id`); `curl` with a bearer token or
+`az rest --method GET --url "…"` work too.
+
+**OneDrive** — the signed-in user, or a specific user:
+
+```
+GET https://graph.microsoft.com/v1.0/me/drive
+GET https://graph.microsoft.com/v1.0/users/{user-id}/drive
+```
+
+**A SharePoint document library** — resolve the site from its URL, then list its libraries:
+
+```
+# 1. Site id from host + server-relative path:
+GET https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/Marketing?$select=id
+#    → "id": "contoso.sharepoint.com,<guid>,<guid>"
+
+# 2. The document libraries (drives) on that site - pick one by name:
+GET https://graph.microsoft.com/v1.0/sites/{site-id}/drives?$select=id,name
+#    → e.g. { "id": "b!AbC…", "name": "Documents" }
+```
+
+(or the site's default library directly: `GET /sites/{site-id}/drive`).
+
+**A Team / Microsoft 365 group:**
+
+```
+GET https://graph.microsoft.com/v1.0/groups/{group-id}/drive
+```
+
+The `id` (a long `b!…` string) is what you pass to `UseSharePointDrive`. Reading a drive id needs
+read access (`Sites.Read.All` / `Files.Read.All`) even if you only ever list it once.
+
+### Supplying your own HttpClient
+
+To use your own pre-authed `HttpClient` (e.g. from `IHttpClientFactory` with your own
 handlers) instead of the token provider, construct the node directly:
 
 ```csharp

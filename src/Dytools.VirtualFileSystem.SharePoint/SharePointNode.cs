@@ -7,6 +7,7 @@ using System.Text.Json;
 using Dytools.VirtualFileSystem;
 using Dytools.VirtualFileSystem.Catalog;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 
@@ -35,37 +36,98 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly HttpClient PlainHttp = new();          // for pre-authed upload-session URLs
 
-    private readonly HttpClient     _http;      // authed Graph client (base https://graph.microsoft.com/v1.0/)
-    private readonly string         _driveId;
-    private readonly string         _rootPath;  // normalized within-drive prefix; "" when none
-    private readonly CatalogMirror? _mirror;    // namespace cache; null = no caching
+    private readonly HttpClient     _http;        // authed Graph client (base https://graph.microsoft.com/v1.0/)
+    private readonly string?        _sitePath;    // set when the drive id is resolved lazily from a site
+    private readonly string?        _libraryName;
+    private readonly string         _rootPath;    // normalized within-drive prefix; "" when none
+    private readonly CatalogMirror? _mirror;      // namespace cache; null = no caching
+    private readonly ILogger?       _logger;
+    private readonly SemaphoreSlim  _driveIdGate = new(1, 1);
+    private          string?        _driveId;     // known up-front, or resolved + cached on first use
 
-    // Activated by MountSingleton<SharePointNode> from the options, the DI token provider, and DI.
+    // Activated by MountSingleton<SharePointNode>. Targets a drive by id (UseSharePointDrive) or
+    // resolves it from a site + library at runtime (UseSharePointSite).
     public SharePointNode(VfsMountOptions options, ISharePointTokenProvider tokens, IServiceProvider services)
-        : this(GraphHttp.CreateClient(tokens),
-               options.Require<SharePointOptions>().DriveId,
-               options.Require<SharePointOptions>().RootPath,
-               CatalogMirror.FromOptions(options.Require<SharePointOptions>().UseCatalog, options, services)) { }
+        : this(GraphHttp.CreateClient(tokens), Opt(options),
+               CatalogMirror.FromOptions(Opt(options).UseCatalog, options, services),
+               services.GetService<ILogger<SharePointNode>>()) { }
 
-    // Advanced / test seam: supply a Graph client whose base address is the Graph v1.0 endpoint
-    // and that already attaches auth, and (optionally) a mirror to cache into.
+    // Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
+    // already attaches auth, targeting a drive by id.
     public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, CatalogMirror? mirror = null)
+        : this(graphClient, new SharePointOptions { DriveId = driveId, RootPath = rootPath }, mirror, null) { }
+
+    // Advanced / test seam: resolve the drive from a site address + library name.
+    public static SharePointNode ForSite(
+        HttpClient graphClient, string sitePath, string? libraryName = null,
+        string? rootPath = null, CatalogMirror? mirror = null, ILogger? logger = null)
+        => new(graphClient, new SharePointOptions { SitePath = sitePath, LibraryName = libraryName, RootPath = rootPath },
+               mirror, logger);
+
+    private SharePointNode(HttpClient http, SharePointOptions o, CatalogMirror? mirror, ILogger? logger)
     {
-        _http    = graphClient ?? throw new ArgumentNullException(nameof(graphClient));
-        _driveId = string.IsNullOrWhiteSpace(driveId)
-            ? throw new ArgumentException("A Graph drive id is required.", nameof(driveId))
-            : driveId;
-        _rootPath = rootPath?.Trim('/') ?? "";
-        _mirror   = mirror;
+        _http        = http ?? throw new ArgumentNullException(nameof(http));
+        _driveId     = string.IsNullOrWhiteSpace(o.DriveId) ? null : o.DriveId;
+        _sitePath    = o.SitePath;
+        _libraryName = o.LibraryName;
+        _rootPath    = o.RootPath?.Trim('/') ?? "";
+        _mirror      = mirror;
+        _logger      = logger;
+
+        if (_driveId is null && string.IsNullOrWhiteSpace(_sitePath))
+            throw new ArgumentException(
+                "A SharePoint mount needs a drive id (UseSharePointDrive) or a site (UseSharePointSite).");
     }
+
+    private static SharePointOptions Opt(VfsMountOptions o) => o.Require<SharePointOptions>();
 
     // SharePoint item names are case-insensitive.
     protected override bool IsCaseSensitive => false;
+
+    // -- Drive id (direct, or resolved from a site) ----------------------------
+
+    // Every operation calls this first. With a known drive id it's a no-op; otherwise it resolves
+    // the id from the site (once, cached) and nudges the developer toward the direct form.
+    private async Task EnsureDriveIdAsync(CancellationToken ct)
+    {
+        if (_driveId is not null) return;
+        await _driveIdGate.WaitAsync(ct);
+        try
+        {
+            if (_driveId is not null) return;
+            var id = await ResolveDriveIdAsync(ct);
+            _logger?.LogWarning(
+                "Resolved the SharePoint drive id for site '{Site}'{Library} to '{DriveId}'. To skip this "
+                + "lookup on every start, switch the mount to UseSharePointDrive(\"{DriveId}\").",
+                _sitePath, _libraryName is null ? "" : $" (library '{_libraryName}')", id, id);
+            _driveId = id;
+        }
+        finally { _driveIdGate.Release(); }
+    }
+
+    private async Task<string> ResolveDriveIdAsync(CancellationToken ct)
+    {
+        var site   = await _http.GetFromJsonAsync<GraphSite>($"sites/{_sitePath}?$select=id", Json, ct);
+        var siteId = site?.Id ?? throw new IOException($"Could not resolve SharePoint site '{_sitePath}'.");
+
+        if (string.IsNullOrEmpty(_libraryName))
+        {
+            var drive = await _http.GetFromJsonAsync<GraphDrive>($"sites/{siteId}/drive?$select=id", Json, ct);
+            return drive?.Id ?? throw new IOException($"Site '{_sitePath}' has no default document library.");
+        }
+
+        var page  = await _http.GetFromJsonAsync<GraphDriveCollection>($"sites/{siteId}/drives?$select=id,name", Json, ct);
+        var match = page?.Value?.FirstOrDefault(d => string.Equals(d.Name, _libraryName, StringComparison.OrdinalIgnoreCase));
+        return match?.Id ?? throw new IOException(
+            $"Document library '{_libraryName}' not found on site '{_sitePath}'. Available: "
+            + $"{string.Join(", ", page?.Value?.Select(d => d.Name) ?? Enumerable.Empty<string?>())}.");
+    }
 
     // -- Read ------------------------------------------------------------------
 
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var resp = await _http.GetAsync(
             ItemUrl(DrivePath(Rel(request)), "/content"), HttpCompletionOption.ResponseHeadersRead, ct);
         if (resp.StatusCode == HttpStatusCode.NotFound)
@@ -93,6 +155,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     // fold the resulting item into the catalog.
     internal async Task CommitUploadAsync(string drivePath, FileStream temp, VfsWriteMode mode)
     {
+        await EnsureDriveIdAsync(CancellationToken.None);
         await temp.FlushAsync();
         temp.Position = 0;
         var conflict = mode == VfsWriteMode.CreateNew ? "fail" : "replace";
@@ -148,6 +211,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var resp = await _http.DeleteAsync(ItemUrl(DrivePath(Rel(request))), ct);
         if (resp.StatusCode != HttpStatusCode.NotFound) resp.EnsureSuccessStatusCode();
         if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
@@ -155,6 +219,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     public override async Task RenameAsync(VfsNodeRequest src, string newName, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), new { name = newName }, Json, ct);
         resp.EnsureSuccessStatusCode();
         if (_mirror is not null) await _mirror.MoveAsync(src.Path, src.Path.WithName(newName), ct);
@@ -162,6 +227,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     public override async Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var dstDrive = DrivePath(Rel(dst));
         var slash    = dstDrive.LastIndexOf('/');
         var parent   = slash < 0 ? "" : dstDrive[..slash];
@@ -183,6 +249,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var resp = await _http.GetAsync(ItemUrl(DrivePath(Rel(request))), ct);
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
@@ -205,6 +272,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         if (_mirror is not null) await SyncAsync(ct);
         await foreach (var info in base.ListAsync(request, options ?? VfsListOptions.Default, ct))
             yield return info;
@@ -244,6 +312,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     public async Task<SharePointChangeBatch> GetChangesAsync(string? cursor, CancellationToken ct = default)
     {
+        await EnsureDriveIdAsync(ct);
         var next      = cursor ?? $"drives/{_driveId}/root/delta";
         var changes   = new List<SharePointChange>();
         var newCursor = cursor ?? "";

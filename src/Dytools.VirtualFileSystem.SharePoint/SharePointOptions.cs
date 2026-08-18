@@ -7,7 +7,13 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 // drive's structure into an IVfsCatalog for fast listings.
 public sealed class SharePointOptions
 {
-    public string  DriveId  { get; set; } = "";
+    // Target the drive directly by id (UseSharePointDrive) …
+    public string? DriveId  { get; set; }
+
+    // … or resolve it at runtime from a site address + library name (UseSharePointSite).
+    public string? SitePath    { get; set; }   // Graph site address, e.g. "host:/sites/{name}"
+    public string? LibraryName { get; set; }   // document library display name; null = the default library
+
     public string? RootPath { get; set; }
 
     // Caching catalog (opt-in via UseCachingCatalog). When set, the node keeps a mirror of the
@@ -36,6 +42,25 @@ public static class SharePointMountOptionsExtensions
         var s = Sp(options);
         s.DriveId  = driveId;
         s.RootPath = rootPath?.Trim('/');
+        return options;
+    }
+
+    // Resolves the drive id at runtime from a site address + library name, so you don't have to look
+    // it up by hand. sitePath is the Graph site address ("host:/sites/{name}", or just "host" for the
+    // root site); libraryName is the document library's display name (null = the site's default
+    // library). On first use the node resolves and caches the id, and logs a Warning with a
+    // copy-pastable UseSharePointDrive("…") line - switch to that once you have the id to skip the
+    // lookup (which otherwise runs once per app start).
+    //
+    //   .MountSingleton<SharePointNode>("/team",
+    //       o => o.UseSharePointSite("contoso.sharepoint.com:/sites/Marketing", "Documents"))
+    public static VfsMountOptions UseSharePointSite(
+        this VfsMountOptions options, string sitePath, string? libraryName = null, string? rootPath = null)
+    {
+        var s = Sp(options);
+        s.SitePath    = sitePath;
+        s.LibraryName = libraryName;
+        s.RootPath    = rootPath?.Trim('/');
         return options;
     }
 

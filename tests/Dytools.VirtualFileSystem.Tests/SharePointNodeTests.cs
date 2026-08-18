@@ -138,6 +138,31 @@ public sealed class SharePointNodeTests
         Assert.Equal(2, handler.Requests.Count);
     }
 
+    [Fact]
+    public async Task ForSite_ResolvesDriveId_FromSiteAndLibrary_ThenUsesIt()
+    {
+        var handler = new StubHandler(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (url.Contains("/drives"))              // list libraries → resolve the drive id
+                return (HttpStatusCode.OK, """{"value":[{"id":"b!RESOLVED","name":"Documents"}]}""");
+            if (url.Contains("?$select=id"))          // resolve the site id
+                return (HttpStatusCode.OK, """{"id":"site-123"}""");
+            return (HttpStatusCode.OK, """{"name":"report.pdf","size":1,"file":{}}""");   // the item op
+        });
+
+        var node = SharePointNode.ForSite(
+            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) },
+            "contoso.sharepoint.com:/sites/Marketing", "Documents");
+
+        var info = await node.GetInfoAsync(Req("docs/report.pdf"));
+
+        Assert.NotNull(info);
+        Assert.Contains(handler.Requests, r => r.Contains("contoso.sharepoint.com") && r.Contains("Marketing"));
+        Assert.Contains(handler.Requests, r => r.Contains("site-123/drives"));
+        Assert.Contains(handler.Requests, r => r.Contains("drives/b!RESOLVED/root"));   // used the resolved id
+    }
+
     // -- Stub transport --------------------------------------------------------
 
     private sealed class StubHandler(Func<HttpRequestMessage, (HttpStatusCode Code, string? Body)> responder)

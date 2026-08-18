@@ -101,3 +101,9 @@ internal sealed class UploadSession
 {
     public string? UploadUrl { get; set; }
 }
+
+// -- Site / drive resolution (UseSharePointSite) -------------------------------
+
+internal sealed class GraphSite  { public string? Id { get; set; } }
+internal sealed class GraphDrive { public string? Id { get; set; } public string? Name { get; set; } }
+internal sealed class GraphDriveCollection { public List<GraphDrive>? Value { get; set; } }
