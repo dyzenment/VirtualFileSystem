@@ -50,6 +50,15 @@ address + library name** and let the node resolve it at runtime:
     o => o.UseSharePointSite("contoso.sharepoint.com:/sites/Marketing", "Documents"))
 ```
 
+The site address is Graph's `{hostname}:/{server-relative-path}` form. You can also just **paste the
+site's browser URL** - `https://contoso.sharepoint.com/sites/Marketing` - and it's converted to that
+form for you (a bare `host` or `host:/path` is used as-is):
+
+```csharp
+.MountSingleton<SharePointNode>("/team",
+    o => o.UseSharePointSite("https://contoso.sharepoint.com/sites/Marketing", "Documents"))
+```
+
 On first use the node resolves the drive id, **caches it, and logs a Warning** with the exact
 `UseSharePointDrive("b!…")` line to paste back into your config - so you get the id from a real
 run, then switch to `UseSharePointDrive` to skip the two extra Graph calls on every start. If you
@@ -119,11 +128,15 @@ services.AddVirtualFileSystem()
 ```
 
 The first listing seeds the whole mirror (one full delta); after that each listing is just the
-changes since last time. The delta cursor is stored in the catalog, so the mirror stays
-incremental across restarts. For libraries with thousands of items use a **database-backed**
-`IVfsCatalog` - the built-in JSON catalog rewrites its whole file on each change and is meant for
-small/medium namespaces. Select a keyed catalog or isolate several mounts within one shared
-catalog using `UseSharePointCachingCatalog(partition: …, serviceKey: …)`:
+changes since last time. The seed streams the delta **page by page**: each page is applied with one
+bulk write and its cursor checkpointed before the next page is fetched — so progress is durable (a
+crash resumes from the last page instead of restarting), and with debug logging on you get a
+per-page heartbeat (`SharePoint delta for '…': page N, M change(s) applied so far`) rather than a
+silent wait. The cursor lives in the catalog, so the mirror stays incremental across restarts. For
+libraries with hundreds of thousands of items a **database-backed** `IVfsCatalog` scales better
+(per-page writes on the JSON catalog rewrite the whole document each time). Select a keyed catalog
+or isolate several mounts within one shared catalog using
+`UseSharePointCachingCatalog(partition: …, serviceKey: …)`:
 
 ```csharp
 .MountSingleton<SharePointNode>("/hr",

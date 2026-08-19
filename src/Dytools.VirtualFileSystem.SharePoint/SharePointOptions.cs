@@ -43,13 +43,16 @@ public static class SharePointMountOptionsExtensions
 
     // Resolves the drive id at runtime from a site address + library name, so you don't have to look
     // it up by hand. sitePath is the Graph site address ("host:/sites/{name}", or just "host" for the
-    // root site); libraryName is the document library's display name (null = the site's default
-    // library). On first use the node resolves and caches the id, and logs a Warning with a
-    // copy-pastable UseSharePointDrive("…") line - switch to that once you have the id to skip the
-    // lookup (which otherwise runs once per app start).
+    // root site) - or simply the browser URL of the site ("https://contoso.sharepoint.com/sites/Marketing"),
+    // which is converted to the Graph form for you. libraryName is the document library's display name
+    // (null = the site's default library). On first use the node resolves and caches the id, and logs a
+    // Warning with a copy-pastable UseSharePointDrive("…") line - switch to that once you have the id to
+    // skip the lookup (which otherwise runs once per app start).
     //
     //   .MountSingleton<SharePointNode>("/team",
     //       o => o.UseSharePointSite("contoso.sharepoint.com:/sites/Marketing", "Documents"))
+    //   .MountSingleton<SharePointNode>("/team",
+    //       o => o.UseSharePointSite("https://contoso.sharepoint.com/sites/Marketing", "Documents"))
     public static VfsMountOptions UseSharePointSite(
         this VfsMountOptions options, string sitePath, string? libraryName = null, string? rootPath = null)
     {

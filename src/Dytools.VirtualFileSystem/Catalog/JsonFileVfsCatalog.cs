@@ -94,22 +94,41 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
 
     // -- Mutations -------------------------------------------------------------
 
-    public async ValueTask<CatalogEntry?> PutFileAsync(CatalogEntry file, CancellationToken ct = default)
+    public async ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry entry, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try { await EnsureLoadedAsync(ct); var prev = PutEntryInMemory(entry); await SaveAsync(ct); return prev; }
+        finally { _gate.Release(); }
+    }
+
+    // Apply many entries (files and/or directories) with the document persisted ONCE at the end - the
+    // fast path for seeding a mirror. Overrides the interface default (which loops PutEntryAsync, one
+    // save each).
+    public async ValueTask PutEntriesAsync(IEnumerable<CatalogEntry> entries, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
         try
         {
             await EnsureLoadedAsync(ct);
-            var key = Key(file.Path);
-            EnsureDir(Parent(key), file.ModifiedAt);
-            _entries!.TryGetValue(key, out var prev);
-            if (prev is { IsDirectory: true })
-                throw new IOException($"Cannot write file over existing directory: '{key}'.");
-            _entries[key] = file with { IsDirectory = false };
+            foreach (var e in entries) PutEntryInMemory(e);
             await SaveAsync(ct);
-            return prev;
         }
         finally { _gate.Release(); }
+    }
+
+    // In-memory upsert of one entry - caller holds the gate and saves. A directory entry ensures the
+    // directory and displaces nothing (returns null); a file entry upserts and returns the displaced one.
+    private CatalogEntry? PutEntryInMemory(CatalogEntry entry)
+    {
+        var key = Key(entry.Path);
+        if (entry.IsDirectory) { EnsureDir(key, entry.ModifiedAt); return null; }
+
+        EnsureDir(Parent(key), entry.ModifiedAt);
+        _entries!.TryGetValue(key, out var prev);
+        if (prev is { IsDirectory: true })
+            throw new IOException($"Cannot write file over existing directory: '{key}'.");
+        _entries[key] = entry with { IsDirectory = false };
+        return prev;
     }
 
     public async ValueTask EnsureDirectoryAsync(VfsPath path, DateTimeOffset timestamp, CancellationToken ct = default)
@@ -122,29 +141,55 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
     public async IAsyncEnumerable<CatalogEntry> RemoveAsync(
         VfsPath path, [EnumeratorCancellation] CancellationToken ct = default)
     {
-        List<CatalogEntry> removedFiles = new();
+        List<CatalogEntry> removedFiles;
         await _gate.WaitAsync(ct);
         try
         {
             await EnsureLoadedAsync(ct);
-            var key = Key(path);
-            if (_entries!.ContainsKey(key))
-            {
-                var prefix = key + "/";
-                foreach (var k in _entries.Keys
-                             .Where(k => k == key || k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
-                {
-                    if (k.Length == 0) continue;
-                    var e = _entries[k];
-                    _entries.Remove(k);
-                    if (!e.IsDirectory) removedFiles.Add(e);
-                }
-                await SaveAsync(ct);
-            }
+            removedFiles = RemoveInMemory(path, out var removedAny);
+            if (removedAny) await SaveAsync(ct);
         }
         finally { _gate.Release(); }
 
         foreach (var f in removedFiles) { ct.ThrowIfCancellationRequested(); yield return f; }
+    }
+
+    // Remove many paths/subtrees, persisting once. Overrides the interface default (loop, save each).
+    // Removed file entries aren't returned - bulk callers that need GC use the single-item RemoveAsync.
+    public async ValueTask RemoveAsync(IEnumerable<VfsPath> paths, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await EnsureLoadedAsync(ct);
+            var removedAny = false;
+            foreach (var p in paths) { RemoveInMemory(p, out var r); removedAny |= r; }
+            if (removedAny) await SaveAsync(ct);
+        }
+        finally { _gate.Release(); }
+    }
+
+    // Remove a path/subtree in memory - caller holds the gate and saves. Returns removed FILE entries;
+    // removedAny reports whether anything (file or directory) was removed, so a no-op skips the save.
+    private List<CatalogEntry> RemoveInMemory(VfsPath path, out bool removedAny)
+    {
+        var removedFiles = new List<CatalogEntry>();
+        removedAny = false;
+        var key = Key(path);
+        if (_entries!.ContainsKey(key))
+        {
+            removedAny = true;
+            var prefix = key + "/";
+            foreach (var k in _entries.Keys
+                         .Where(k => k == key || k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+            {
+                if (k.Length == 0) continue;
+                var e = _entries[k];
+                _entries.Remove(k);
+                if (!e.IsDirectory) removedFiles.Add(e);
+            }
+        }
+        return removedFiles;
     }
 
     public async ValueTask MoveAsync(VfsPath fromPath, VfsPath toPath, CancellationToken ct = default)

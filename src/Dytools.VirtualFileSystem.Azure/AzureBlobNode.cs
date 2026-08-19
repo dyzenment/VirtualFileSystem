@@ -293,35 +293,88 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         if (await _mirror!.GetStateAsync("seeded", ct) is null) await ResyncAsync(ct);
     }
 
-    // Full re-list: clear the mirror, then a flat enumeration (fixed container, or every container
-    // in account-wide mode), upserting each blob.
-    private Task ResyncAsync(CancellationToken ct) => _mirror!.SyncAsync(async token =>
+    private const int ResyncChunk = 2000;   // blobs per bulk upsert during a re-list
+
+    // Cross-instance sync gate (re-up per chunk means the TTL only has to cover one chunk).
+    private static readonly TimeSpan SyncTtl           = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SyncAbortMargin   = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan SyncTakeoverGrace = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan SyncPollInterval  = TimeSpan.FromSeconds(2);
+    private const int SyncMaxAttempts = 3;
+
+    private static string ExpiresValue(DateTimeOffset t) => t.ToUnixTimeMilliseconds().ToString();
+    private static bool   PastGrace(string v, TimeSpan grace)
+        => !long.TryParse(v, out var ms) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= ms + (long)grace.TotalMilliseconds;
+
+    // Full re-list: clear the mirror, then a flat enumeration (fixed container, or every container in
+    // account-wide mode). Blobs are buffered and applied in bulk chunks - one document write per chunk.
+    // A datetime lease in `sync-expires` gates it across instances: acquire atomically, re-up the expiry
+    // each chunk, abort just before expiry if a chunk overruns; on success set "seeded" and clear the
+    // lease. A loser waits for the holder to finish (cleared) or die (expired), taking over in that case
+    // - bounded by SyncMaxAttempts, then it just serves what's mirrored.
+    private async Task ResyncAsync(CancellationToken ct)
     {
-        await _mirror.ClearAsync(token);
-
-        if (AccountWide)
+        var mirror = _mirror!;
+        for (var attempt = 0; attempt < SyncMaxAttempts; attempt++)
         {
-            var svc = _service!;
-            await foreach (var c in svc.GetBlobContainersAsync(cancellationToken: token))
+            var expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+            if (await mirror.SetIfNullStateAsync("sync-expires", ExpiresValue(expiresAt), ct))
             {
-                var cont = svc.GetBlobContainerClient(c.Name);
-                await foreach (var b in cont.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: null, token))
-                    await _mirror.UpsertAsync(BlobInfo(Rebase(b.Name, c.Name), b), token);
+                await mirror.ClearAsync(ct);
+
+                var batch = new List<VfsNodeInfo>(ResyncChunk);
+                // Upsert the buffered chunk and re-up the lease; returns true if we overran and should abort.
+                async Task<bool> FlushAsync()
+                {
+                    if (batch.Count == 0) return false;
+                    await mirror.UpsertAsync(batch, ct);
+                    batch.Clear();
+                    if (DateTimeOffset.UtcNow >= expiresAt - SyncAbortMargin) return true;
+                    expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+                    await mirror.SetStateAsync("sync-expires", ExpiresValue(expiresAt), ct);
+                    return false;
+                }
+
+                if (AccountWide)
+                {
+                    var svc = _service!;
+                    await foreach (var c in svc.GetBlobContainersAsync(cancellationToken: ct))
+                    {
+                        var cont = svc.GetBlobContainerClient(c.Name);
+                        await foreach (var b in cont.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: null, ct))
+                        {
+                            batch.Add(BlobInfo(Rebase(b.Name, c.Name), b));
+                            if (batch.Count >= ResyncChunk && await FlushAsync()) return;   // overran → abort
+                        }
+                    }
+                }
+                else
+                {
+                    var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
+                    await foreach (var b in _container!.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: scanPrefix, ct))
+                    {
+                        var rel = Rebase(b.Name, "");
+                        if (rel.Length == 0) continue;
+                        batch.Add(BlobInfo(rel, b));
+                        if (batch.Count >= ResyncChunk && await FlushAsync()) return;   // overran → abort
+                    }
+                }
+
+                await FlushAsync();
+                await mirror.SetStateAsync("seeded", "1", ct);
+                await mirror.ClearStateAsync("sync-expires", CancellationToken.None);   // done → waiters serve at once
+                return;
+            }
+
+            while (true)
+            {
+                await Task.Delay(SyncPollInterval, ct);
+                var v = await mirror.GetStateAsync("sync-expires", ct);
+                if (v is null) return;                                                   // finished → serve current mirror
+                if (PastGrace(v, SyncTakeoverGrace)) { await mirror.ClearStateAsync("sync-expires", ct); break; }   // died → take over
             }
         }
-        else
-        {
-            var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
-            await foreach (var b in _container!.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: scanPrefix, token))
-            {
-                var rel = Rebase(b.Name, "");
-                if (rel.Length == 0) continue;
-                await _mirror.UpsertAsync(BlobInfo(rel, b), token);
-            }
-        }
-
-        await _mirror.SetStateAsync("seeded", "1", token);
-    }, ct);
+    }
 
     private static VfsNodeInfo BlobInfo(string rel, BlobItem b) => new()
     {

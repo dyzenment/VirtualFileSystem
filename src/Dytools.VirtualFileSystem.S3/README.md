@@ -58,9 +58,10 @@ made **through this VFS** are written through immediately (write/delete/copy/mov
 await vfs.GetCapability<ICatalogMirror>("/archive")!.RefreshAsync();
 ```
 
-Select a keyed or partitioned catalog with `UseS3CachingCatalog(partition: …, serviceKey: …)`. Use a
-database-backed `IVfsCatalog` for large buckets - the built-in JSON catalog rewrites its whole
-file per change and is meant for small/medium namespaces.
+Select a keyed or partitioned catalog with `UseS3CachingCatalog(partition: …, serviceKey: …)`. The
+seed (and every `RefreshAsync`) applies as a single batched write, so re-listing a large bucket is
+linear; the built-in JSON catalog still rewrites its whole file per *steady-state* change, so for
+very large or write-heavy buckets use a database-backed `IVfsCatalog`.
 
 ## Notes
 

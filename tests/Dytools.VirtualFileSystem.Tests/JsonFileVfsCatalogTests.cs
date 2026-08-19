@@ -22,8 +22,8 @@ public sealed class JsonFileVfsCatalogTests
     public async Task Put_Get_List_Roundtrip()
     {
         var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
-        await cat.PutFileAsync(File("docs/a.txt", "h1"));
-        await cat.PutFileAsync(File("docs/b.txt", "h2"));
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
+        await cat.PutEntryAsync(File("docs/b.txt", "h2"));
 
         Assert.Equal("h1", (await cat.GetAsync(P("docs/a.txt")))!.ContentId);
 
@@ -34,11 +34,64 @@ public sealed class JsonFileVfsCatalogTests
     }
 
     [Fact]
+    public async Task PutEntries_CoalescesToOneWrite_AndAppliesAll()
+    {
+        var store = new WriteCountingNode();
+        var cat   = new JsonFileVfsCatalog(store);
+        await cat.PutEntryAsync(File("seed.txt", "s"));   // establish a baseline write count
+        var baseline = store.Writes;
+
+        await cat.PutEntriesAsync(Enumerable.Range(0, 50).Select(i => File($"docs/f{i}.txt", $"h{i}")));
+
+        Assert.Equal(baseline + 1, store.Writes);   // 50 entries persisted with a single document write
+        for (var i = 0; i < 50; i++)
+            Assert.Equal($"h{i}", (await cat.GetAsync(P($"docs/f{i}.txt")))!.ContentId);
+        // Survives reload from the same store.
+        Assert.Equal("h49", (await new JsonFileVfsCatalog(store).GetAsync(P("docs/f49.txt")))!.ContentId);
+    }
+
+    [Fact]
+    public async Task BulkRemove_CoalescesToOneWrite()
+    {
+        var store = new WriteCountingNode();
+        var cat   = new JsonFileVfsCatalog(store);
+        await cat.PutEntriesAsync(Enumerable.Range(0, 10).Select(i => File($"docs/f{i}.txt", $"h{i}")));
+        var baseline = store.Writes;
+
+        await cat.RemoveAsync(Enumerable.Range(0, 10).Select(i => P($"docs/f{i}.txt")));
+
+        Assert.Equal(baseline + 1, store.Writes);   // 10 removals persisted with a single document write
+        Assert.Null(await cat.GetAsync(P("docs/f0.txt")));
+        Assert.Null(await cat.GetAsync(P("docs/f9.txt")));
+    }
+
+    // Wraps an InMemoryKvNode and counts document writes (each JsonFileVfsCatalog save is one
+    // OpenWrite of the temp file). Only the members the catalog touches are forwarded.
+    private sealed class WriteCountingNode : VfsNodeBase
+    {
+        private readonly InMemoryKvNode _inner = new();
+        public int Writes { get; private set; }
+
+        public override Task<Stream?> OpenReadAsync(VfsNodeRequest r, CancellationToken ct = default)
+            => _inner.OpenReadAsync(r, ct);
+        public override Task<Stream> OpenWriteAsync(VfsNodeRequest r, VfsWriteMode m = VfsWriteMode.Create, CancellationToken ct = default)
+        { Writes++; return _inner.OpenWriteAsync(r, m, ct); }
+        public override Task RenameAsync(VfsNodeRequest r, string newName, CancellationToken ct = default)
+            => _inner.RenameAsync(r, newName, ct);
+        public override Task DeleteAsync(VfsNodeRequest r, CancellationToken ct = default)
+            => _inner.DeleteAsync(r, ct);
+        public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest r, CancellationToken ct = default)
+            => _inner.GetInfoAsync(r, ct);
+        protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest r, CancellationToken ct = default)
+            => _inner.ListAsync(r, VfsListOptions.Default, ct);
+    }
+
+    [Fact]
     public async Task TouchAccessed_UpdatesAccessedAt_AndPersists()
     {
         var store = new InMemoryKvNode();
         var cat   = new JsonFileVfsCatalog(store);
-        await cat.PutFileAsync(File("docs/a.txt", "h1"));
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
 
         var t = DateTimeOffset.UnixEpoch.AddDays(10);
         await cat.TouchAccessedAsync(P("docs/a.txt"), t);
@@ -52,7 +105,7 @@ public sealed class JsonFileVfsCatalogTests
     public async Task TouchAccessed_CoalescesWithinWindow_ButUpdatesBeyondIt()
     {
         var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
-        await cat.PutFileAsync(File("docs/a.txt", "h1"));
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
 
         var t0 = DateTimeOffset.UnixEpoch.AddDays(10);
         await cat.TouchAccessedAsync(P("docs/a.txt"), t0);
@@ -83,8 +136,8 @@ public sealed class JsonFileVfsCatalogTests
         var store = new InMemoryKvNode();
 
         var first = new JsonFileVfsCatalog(store);
-        await first.PutFileAsync(File("reports/q3.pdf", "abc"));
-        await first.PutFileAsync(File("reports/q4.pdf", "def"));
+        await first.PutEntryAsync(File("reports/q3.pdf", "abc"));
+        await first.PutEntryAsync(File("reports/q4.pdf", "def"));
 
         // A fresh catalog over the same store must load what was persisted.
         var reloaded = new JsonFileVfsCatalog(store);
@@ -97,8 +150,8 @@ public sealed class JsonFileVfsCatalogTests
     public async Task ReferenceCount_And_FindByHash()
     {
         var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
-        await cat.PutFileAsync(File("a.txt", "same"));
-        await cat.PutFileAsync(File("b.txt", "same"));
+        await cat.PutEntryAsync(File("a.txt", "same"));
+        await cat.PutEntryAsync(File("b.txt", "same"));
 
         Assert.Equal(2, await cat.ReferenceCountAsync("same"));
         Assert.Equal("same", await cat.FindContentIdByHashAsync("same"));
@@ -110,8 +163,8 @@ public sealed class JsonFileVfsCatalogTests
     {
         var store = new InMemoryKvNode();
         var cat = new JsonFileVfsCatalog(store);
-        await cat.PutFileAsync(File("dir/a.txt", "h1"));
-        await cat.PutFileAsync(File("dir/b.txt", "h2"));
+        await cat.PutEntryAsync(File("dir/a.txt", "h1"));
+        await cat.PutEntryAsync(File("dir/b.txt", "h2"));
 
         var removed = new List<string>();
         await foreach (var e in cat.RemoveAsync(P("dir"))) removed.Add(e.Path.ToString());
@@ -131,8 +184,8 @@ public sealed class JsonFileVfsCatalogTests
         var files   = a.ForPartition("files");
         var archive = a.ForPartition("archive");
 
-        await files.PutFileAsync(File("x.txt", "hx"));
-        await archive.PutFileAsync(File("x.txt", "hy"));   // same path, different partition
+        await files.PutEntryAsync(File("x.txt", "hx"));
+        await archive.PutEntryAsync(File("x.txt", "hy"));   // same path, different partition
 
         Assert.Equal("hx", (await files.GetAsync(P("x.txt")))!.ContentId);
         Assert.Equal("hy", (await archive.GetAsync(P("x.txt")))!.ContentId);   // no collision
@@ -149,7 +202,7 @@ public sealed class JsonFileVfsCatalogTests
         props.Put("partCount", 7);
         props.PutJson("checksums", new[] { "sha256:aa", "crc32:bb" });   // structured → JSON string
 
-        await cat.PutFileAsync(File("docs/a.txt", "h1") with
+        await cat.PutEntryAsync(File("docs/a.txt", "h1") with
         {
             IsHidden   = true,
             AccessedAt = DateTimeOffset.UnixEpoch.AddHours(3),

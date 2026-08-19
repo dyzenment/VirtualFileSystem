@@ -132,7 +132,7 @@ public sealed class DedupeNode : VfsNodeBase
         }
 
         var now = DateTimeOffset.UtcNow;
-        var prev = await _catalog.PutFileAsync(new CatalogEntry
+        var prev = await _catalog.PutEntryAsync(new CatalogEntry
         {
             Path        = path,
             IsDirectory = false,
@@ -191,7 +191,7 @@ public sealed class DedupeNode : VfsNodeBase
 
         var now = DateTimeOffset.UtcNow;
         if (entry.IsDirectory) { await CopyTreeAsync(from, to, now, ct); return; }
-        await _catalog.PutFileAsync(entry with { Path = to, CreatedAt = now, ModifiedAt = now }, ct);
+        await _catalog.PutEntryAsync(entry with { Path = to, CreatedAt = now, ModifiedAt = now }, ct);
     }
 
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
@@ -204,7 +204,7 @@ public sealed class DedupeNode : VfsNodeBase
         {
             var childDst = VfsPath.From(dst, child.Path.GetName());
             if (child.IsDirectory) await CopyTreeAsync(child.Path, childDst, now, ct);
-            else await _catalog.PutFileAsync(child with { Path = childDst, CreatedAt = now, ModifiedAt = now }, ct);
+            else await _catalog.PutEntryAsync(child with { Path = childDst, CreatedAt = now, ModifiedAt = now }, ct);
         }
     }
 

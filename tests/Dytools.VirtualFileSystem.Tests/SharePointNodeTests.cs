@@ -139,6 +139,37 @@ public sealed class SharePointNodeTests
     }
 
     [Fact]
+    public async Task Catalog_MultiPageDelta_SeedsEveryPage_AndCheckpointsCursor()
+    {
+        const string page1 = """
+            {"value":[{"name":"a.txt","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:"}}],
+            "@odata.nextLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=P2"}
+            """;
+        const string page2 = """
+            {"value":[{"name":"b.txt","size":2,"file":{},"parentReference":{"path":"/drives/drive1/root:"}}],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=DONE"}
+            """;
+        var handler = new StubHandler(req =>
+            (HttpStatusCode.OK, req.RequestUri!.ToString().Contains("token=P2") ? page2 : page1));
+        var mirror  = new CatalogMirror(new JsonFileVfsCatalog(new InMemoryKvNode()));
+        var node    = new SharePointNode(
+            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", null, mirror);
+
+        var root = new List<string>();
+        await foreach (var i in node.ListAsync(Req(""), VfsListOptions.Default))
+            root.Add(i.RelativePath.ToString());
+
+        Assert.Contains("a.txt", root);            // seeded from page 1
+        Assert.Contains("b.txt", root);            // seeded from page 2
+        Assert.Equal(2, handler.Requests.Count);   // both delta pages fetched
+
+        // The terminal deltaLink was checkpointed, so a later sync resumes from it (not a fresh delta).
+        var before = handler.Requests.Count;
+        await node.RefreshAsync();
+        Assert.Contains("token=DONE", handler.Requests[before]);
+    }
+
+    [Fact]
     public async Task ForSite_ResolvesDriveId_FromSiteAndLibrary_ThenUsesIt()
     {
         var handler = new StubHandler(req =>
@@ -162,6 +193,38 @@ public sealed class SharePointNodeTests
         Assert.Contains(handler.Requests, r => r.Contains("site-123/drives"));
         Assert.Contains(handler.Requests, r => r.Contains("drives/b!RESOLVED/root"));   // used the resolved id
     }
+
+    [Fact]
+    public async Task ForSite_ConvertsFullUrl_ToGraphSiteAddress()
+    {
+        var handler = new StubHandler(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (url.Contains("/drive?"))      return (HttpStatusCode.OK, """{"id":"b!RESOLVED"}""");
+            if (url.Contains("?$select=id"))  return (HttpStatusCode.OK, """{"id":"site-123"}""");
+            return (HttpStatusCode.OK, """{"name":"report.pdf","size":1,"file":{}}""");
+        });
+
+        // A full browser URL is normalized to Graph's "{host}:/{path}" site address.
+        var node = SharePointNode.ForSite(
+            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) },
+            "https://fslgroup2.sharepoint.com/sites/FSLSW");
+
+        await node.GetInfoAsync(Req("docs/report.pdf"));
+
+        Assert.Contains(handler.Requests,
+            r => r.Contains("sites/fslgroup2.sharepoint.com:/sites/FSLSW?$select=id"));
+        Assert.DoesNotContain(handler.Requests, r => r.Contains("https://fslgroup2"));   // no raw URL leaked
+    }
+
+    [Theory]
+    [InlineData("https://contoso.sharepoint.com/sites/Marketing", "contoso.sharepoint.com:/sites/Marketing")]
+    [InlineData("https://contoso.sharepoint.com/sites/Marketing/", "contoso.sharepoint.com:/sites/Marketing")]
+    [InlineData("https://contoso.sharepoint.com", "contoso.sharepoint.com")]
+    [InlineData("contoso.sharepoint.com:/sites/Marketing", "contoso.sharepoint.com:/sites/Marketing")]
+    [InlineData("contoso.sharepoint.com", "contoso.sharepoint.com")]
+    public void NormalizeSiteAddress_ConvertsUrls_AndLeavesGraphFormsAlone(string input, string expected)
+        => Assert.Equal(expected, SharePointNode.NormalizeSiteAddress(input));
 
     // -- Stub transport --------------------------------------------------------
 

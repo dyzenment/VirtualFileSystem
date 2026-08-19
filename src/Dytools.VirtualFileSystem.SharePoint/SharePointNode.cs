@@ -76,7 +76,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     {
         _http        = http ?? throw new ArgumentNullException(nameof(http));
         _driveId     = string.IsNullOrWhiteSpace(o.DriveId) ? null : o.DriveId;
-        _sitePath    = o.SitePath;
+        _sitePath    = NormalizeSiteAddress(o.SitePath);
         _libraryName = o.LibraryName;
         _rootPath    = o.RootPath?.Trim('/') ?? "";
         _mirror      = mirror;
@@ -129,6 +129,22 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         return match?.Id ?? throw new IOException(
             $"Document library '{_libraryName}' not found on site '{_sitePath}'. Available: "
             + $"{string.Join(", ", page?.Value?.Select(d => d.Name) ?? Enumerable.Empty<string?>())}.");
+    }
+
+    // Graph addresses a site as "{hostname}:/{server-relative-path}" (or just "{hostname}" for the
+    // root site) - not as a URL. Callers often paste the browser URL instead, so accept a full
+    // http(s) URL and convert it: "https://contoso.sharepoint.com/sites/Marketing" becomes
+    // "contoso.sharepoint.com:/sites/Marketing". Anything already in Graph form (a bare host, or
+    // "host:/path" - which parses with a non-http scheme), and null/empty, passes through unchanged.
+    internal static string? NormalizeSiteAddress(string? sitePath)
+    {
+        if (string.IsNullOrWhiteSpace(sitePath)) return sitePath;
+        if (!Uri.TryCreate(sitePath, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            return sitePath;
+
+        var path = uri.AbsolutePath.Trim('/');
+        return path.Length == 0 ? uri.Host : $"{uri.Host}:/{path}";
     }
 
     // -- Read ------------------------------------------------------------------
@@ -322,22 +338,37 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     public async Task<SharePointChangeBatch> GetChangesAsync(string? cursor, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
-        var next      = cursor ?? $"drives/{_driveId}/root/delta";
         var changes   = new List<SharePointChange>();
         var newCursor = cursor ?? "";
+        await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
+        {
+            changes.AddRange(page.Changes);
+            if (page.IsComplete && page.Continuation is not null) newCursor = page.Continuation;
+        }
+        return new SharePointChangeBatch(changes, newCursor);
+    }
 
+    // Walk the delta feed one page at a time from startLink (null = a fresh full delta). Each page
+    // carries its changes plus a Continuation link and whether it's the terminal page: for a non-final
+    // page Continuation is the nextLink (resume/keep paging here); for the final page it's the deltaLink
+    // (the cursor for the next incremental sync). Streaming (rather than collecting everything first)
+    // lets the seeder apply, checkpoint, and report progress page by page - a large first delta isn't a
+    // silent wait, and a crash resumes from the last saved Continuation instead of restarting.
+    private async IAsyncEnumerable<(IReadOnlyList<SharePointChange> Changes, string? Continuation, bool IsComplete)>
+        EnumerateDeltaPagesAsync(string? startLink, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var next = startLink ?? $"drives/{_driveId}/root/delta";
         while (next is not null)
         {
-            var page = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct);
+            var page    = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct);
+            var changes = new List<SharePointChange>();
             if (page?.Value is not null)
                 foreach (var item in page.Value)
                     if (ToChange(item) is { } change) changes.Add(change);
 
-            if (page?.NextLink is not null) { next = page.NextLink; continue; }
-            newCursor = page?.DeltaLink ?? newCursor;
-            next = null;
+            if (page?.NextLink is not null) { yield return (changes, page.NextLink, false); next = page.NextLink; }
+            else                           { yield return (changes, page?.DeltaLink, true); next = null; }
         }
-        return new SharePointChangeBatch(changes, newCursor);
     }
 
     private SharePointChange? ToChange(DriveItem item)
@@ -362,20 +393,73 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     // callers that want an explicit refresh without listing.
     public Task RefreshAsync(CancellationToken ct = default) => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
 
-    // Incremental delta from the stored cursor, applied through the shared mirror.
-    private Task SyncAsync(CancellationToken ct) => _mirror!.SyncAsync(async token =>
+    // Cross-instance sync gate (sizing is deliberately generous; re-up per page means the TTL only has
+    // to cover ONE delta page, not the whole delta).
+    private static readonly TimeSpan SyncTtl           = TimeSpan.FromSeconds(30);   // lease per re-up
+    private static readonly TimeSpan SyncAbortMargin   = TimeSpan.FromSeconds(5);    // winner stops this early
+    private static readonly TimeSpan SyncTakeoverGrace = TimeSpan.FromSeconds(3);    // waiter waits this past expiry
+    private static readonly TimeSpan SyncPollInterval  = TimeSpan.FromSeconds(2);
+    private const int SyncMaxAttempts = 3;
+
+    private static string  ExpiresValue(DateTimeOffset t) => t.ToUnixTimeMilliseconds().ToString();
+    private static bool    PastGrace(string v, TimeSpan grace)
+        => !long.TryParse(v, out var ms) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= ms + (long)grace.TotalMilliseconds;
+
+    // Incremental delta from the stored cursor, applied one page at a time (bulk upsert/remove = one
+    // document write per page), checkpointing the cursor each page so a crash/abort resumes from there.
+    // A datetime lease in `sync-expires` gates it across instances: acquire atomically (SetIfNull), re-up
+    // the expiry each page, and abort just before the expiry if a page overruns; on success clear the
+    // lease so waiters serve at once. A loser waits for the holder to finish (cleared) or die (expired),
+    // taking over in that case - bounded by SyncMaxAttempts, then it just serves what's mirrored.
+    private async Task SyncAsync(CancellationToken ct)
     {
-        var cursor = await _mirror.GetStateAsync("cursor", token);
-        var batch  = await GetChangesAsync(cursor, token);
-
-        foreach (var change in batch.Changes)
+        var mirror = _mirror!;
+        for (var attempt = 0; attempt < SyncMaxAttempts; attempt++)
         {
-            if (change.Type == SharePointChangeType.Deleted) await _mirror.RemoveAsync(VfsPath.From(change.Path), token);
-            else if (change.Info is not null)                await _mirror.UpsertAsync(change.Info, token);
-        }
+            var expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+            if (await mirror.SetIfNullStateAsync("sync-expires", ExpiresValue(expiresAt), ct))
+            {
+                var cursor = await mirror.GetStateAsync("cursor", ct);
+                var site   = _sitePath ?? _driveId;
+                int applied = 0, pages = 0;
 
-        if (!string.IsNullOrEmpty(batch.Cursor)) await _mirror.SetStateAsync("cursor", batch.Cursor, token);
-    }, ct);
+                await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
+                {
+                    var deletes = new List<VfsPath>();
+                    var upserts = new List<VfsNodeInfo>();
+                    foreach (var change in page.Changes)
+                        if (change.Type == SharePointChangeType.Deleted) deletes.Add(VfsPath.From(change.Path));
+                        else if (change.Info is not null)                upserts.Add(change.Info);
+
+                    if (deletes.Count > 0) await mirror.RemoveAsync(deletes, ct);
+                    if (upserts.Count > 0) await mirror.UpsertAsync(upserts, ct);
+                    if (page.Continuation is not null) await mirror.SetStateAsync("cursor", page.Continuation, ct);
+
+                    applied += page.Changes.Count;
+                    pages++;
+                    _logger?.LogDebug("SharePoint delta for '{Site}': page {Page}, {Applied} change(s) applied so far{Done}.",
+                        site, pages, applied, page.IsComplete ? " (complete)" : "");
+
+                    if (DateTimeOffset.UtcNow >= expiresAt - SyncAbortMargin) return;   // overran → abort, let the lease lapse
+                    expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+                    await mirror.SetStateAsync("sync-expires", ExpiresValue(expiresAt), ct);   // re-up
+                }
+
+                await mirror.ClearStateAsync("sync-expires", CancellationToken.None);   // done → waiters serve at once
+                return;
+            }
+
+            // Another instance holds the lease: wait for it to finish (cleared) or die (expired).
+            while (true)
+            {
+                await Task.Delay(SyncPollInterval, ct);
+                var v = await mirror.GetStateAsync("sync-expires", ct);
+                if (v is null) return;                                                   // finished → serve current mirror
+                if (PastGrace(v, SyncTakeoverGrace)) { await mirror.ClearStateAsync("sync-expires", ct); break; }   // died → take over
+            }
+        }
+        // exhausted attempts → serve whatever is mirrored
+    }
 
     // -- Helpers ---------------------------------------------------------------
 

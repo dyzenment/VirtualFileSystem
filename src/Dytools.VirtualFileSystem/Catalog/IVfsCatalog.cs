@@ -32,10 +32,11 @@ public interface IVfsCatalog
 
     // -- Mutations -------------------------------------------------------------
 
-    // Create or replace a file entry, creating any missing ancestor directories.
-    // Returns the entry previously at that path (if any) so the caller can GC the
-    // blob it used to reference.
-    ValueTask<CatalogEntry?> PutFileAsync(CatalogEntry file, CancellationToken ct = default);
+    // Create or replace an entry (a catalog holds no bytes - a file entry is a pointer + metadata, a
+    // directory entry is just a node; IsDirectory picks which). Creates any missing ancestor dirs.
+    // Returns the entry previously at that path, if any, so a file caller can GC the blob it
+    // referenced; a directory upsert displaces nothing and returns null.
+    ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry entry, CancellationToken ct = default);
 
     // Ensure a directory entry (and its ancestors) exist. No-op if already present.
     ValueTask EnsureDirectoryAsync(VfsPath path, DateTimeOffset timestamp, CancellationToken ct = default);
@@ -47,6 +48,25 @@ public interface IVfsCatalog
     // Re-key a path (and its subtree, if a directory) to a new location. Content and
     // reference counts are unchanged - a pure namespace move.
     ValueTask MoveAsync(VfsPath fromPath, VfsPath toPath, CancellationToken ct = default);
+
+    // -- Bulk mutations --------------------------------------------------------
+
+    // Apply many entries (files and/or directories) as one unit. The default just loops PutEntryAsync
+    // - correct, but a per-entry persist each time (and JsonFileVfsCatalog rewrites its whole document
+    // per persist, so a large seed would be O(n²)). Implementations that can persist a whole set in one
+    // shot (one document write, one DB transaction) override this.
+    async ValueTask PutEntriesAsync(IEnumerable<CatalogEntry> entries, CancellationToken ct = default)
+    {
+        foreach (var e in entries) await PutEntryAsync(e, ct);
+    }
+
+    // Remove many paths/subtrees as one unit. Default loops the single-item RemoveAsync (draining the
+    // removed-file streams, which bulk callers don't consume); override to persist once.
+    async ValueTask RemoveAsync(IEnumerable<VfsPath> paths, CancellationToken ct = default)
+    {
+        foreach (var p in paths)
+            await foreach (var _ in RemoveAsync(p, ct)) { }
+    }
 
     // Best-effort: record that `path` was read at `accessedAt`, updating its AccessedAt. Approximate
     // by design - it only sees reads that go through the VFS, not external access - so it's meant for

@@ -47,16 +47,17 @@ internal sealed class InMemoryVfsCatalog : IVfsCatalog
         }
     }
 
-    public ValueTask<CatalogEntry?> PutFileAsync(CatalogEntry file, CancellationToken ct = default)
+    public ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry entry, CancellationToken ct = default)
     {
-        var key = Key(file.Path);
+        var key = Key(entry.Path);
         lock (_lock)
         {
-            EnsureDir(Parent(key), file.ModifiedAt);
+            if (entry.IsDirectory) { EnsureDir(key, entry.ModifiedAt); return new ValueTask<CatalogEntry?>((CatalogEntry?)null); }
+            EnsureDir(Parent(key), entry.ModifiedAt);
             _entries.TryGetValue(key, out var prev);
             if (prev is { IsDirectory: true })
                 throw new IOException($"Cannot write file over existing directory: '{key}'.");
-            _entries[key] = file with { IsDirectory = false };
+            _entries[key] = entry with { IsDirectory = false };
             return new ValueTask<CatalogEntry?>(prev);
         }
     }

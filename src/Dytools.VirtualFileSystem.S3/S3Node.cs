@@ -225,43 +225,83 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         if (await _mirror!.GetStateAsync("seeded", ct) is null) await ResyncAsync(ct);
     }
 
-    // Full re-list: clear the mirror, then a single flat (delimiter-free) scan of the whole prefix.
-    private Task ResyncAsync(CancellationToken ct) => _mirror!.SyncAsync(async token =>
+    // Cross-instance sync gate (re-up per S3 page means the TTL only has to cover one page).
+    private static readonly TimeSpan SyncTtl           = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SyncAbortMargin   = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan SyncTakeoverGrace = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan SyncPollInterval  = TimeSpan.FromSeconds(2);
+    private const int SyncMaxAttempts = 3;
+
+    private static string ExpiresValue(DateTimeOffset t) => t.ToUnixTimeMilliseconds().ToString();
+    private static bool   PastGrace(string v, TimeSpan grace)
+        => !long.TryParse(v, out var ms) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= ms + (long)grace.TotalMilliseconds;
+
+    // Full re-list: clear the mirror, then a flat (delimiter-free) scan of the whole prefix. Each S3
+    // page (up to 1000 objects) is applied as one bulk upsert - one document write per page, not per
+    // object. A datetime lease in `sync-expires` gates it across instances: acquire atomically, re-up
+    // the expiry each page, abort just before expiry if a page overruns; on success set "seeded" and
+    // clear the lease. A loser waits for the holder to finish (cleared) or die (expired), taking over
+    // in that case - bounded by SyncMaxAttempts, then it just serves what's mirrored.
+    private async Task ResyncAsync(CancellationToken ct)
     {
-        await _mirror.ClearAsync(token);
-
-        var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
-        string? cont = null;
-        do
+        var mirror = _mirror!;
+        for (var attempt = 0; attempt < SyncMaxAttempts; attempt++)
         {
-            var resp = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+            var expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+            if (await mirror.SetIfNullStateAsync("sync-expires", ExpiresValue(expiresAt), ct))
             {
-                BucketName = _bucket, Prefix = scanPrefix, ContinuationToken = cont,
-            }, token);
+                await mirror.ClearAsync(ct);
 
-            foreach (var obj in resp.S3Objects ?? [])
-            {
-                if (obj.Key.EndsWith('/')) continue;              // directory-marker object
-                var rel = StripPrefix(obj.Key);
-                if (rel.Length == 0) continue;
-                await _mirror.UpsertAsync(new VfsNodeInfo
+                var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
+                string? cont = null;
+                do
                 {
-                    RelativePath = VfsPath.From(rel),
-                    IsFile       = true,
-                    IsDirectory  = false,
-                    SizeBytes    = obj.Size,
-                    ModifiedAt   = ToUtc(obj.LastModified),
-                    Properties   = obj.ETag is null
-                        ? ImmutableDictionary<string, string?>.Empty
-                        : ImmutableDictionary<string, string?>.Empty.Add("ETag", obj.ETag),
-                }, token);
-            }
-            cont = resp.IsTruncated == true ? resp.NextContinuationToken : null;
-        }
-        while (cont is not null);
+                    var resp = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+                    {
+                        BucketName = _bucket, Prefix = scanPrefix, ContinuationToken = cont,
+                    }, ct);
 
-        await _mirror.SetStateAsync("seeded", "1", token);
-    }, ct);
+                    var batch = new List<VfsNodeInfo>();
+                    foreach (var obj in resp.S3Objects ?? [])
+                    {
+                        if (obj.Key.EndsWith('/')) continue;              // directory-marker object
+                        var rel = StripPrefix(obj.Key);
+                        if (rel.Length == 0) continue;
+                        batch.Add(new VfsNodeInfo
+                        {
+                            RelativePath = VfsPath.From(rel),
+                            IsFile       = true,
+                            IsDirectory  = false,
+                            SizeBytes    = obj.Size,
+                            ModifiedAt   = ToUtc(obj.LastModified),
+                            Properties   = obj.ETag is null
+                                ? ImmutableDictionary<string, string?>.Empty
+                                : ImmutableDictionary<string, string?>.Empty.Add("ETag", obj.ETag),
+                        });
+                    }
+                    if (batch.Count > 0) await mirror.UpsertAsync(batch, ct);
+                    cont = resp.IsTruncated == true ? resp.NextContinuationToken : null;
+
+                    if (DateTimeOffset.UtcNow >= expiresAt - SyncAbortMargin) return;   // overran → abort, let the lease lapse
+                    expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+                    await mirror.SetStateAsync("sync-expires", ExpiresValue(expiresAt), ct);   // re-up
+                }
+                while (cont is not null);
+
+                await mirror.SetStateAsync("seeded", "1", ct);
+                await mirror.ClearStateAsync("sync-expires", CancellationToken.None);   // done → waiters serve at once
+                return;
+            }
+
+            while (true)
+            {
+                await Task.Delay(SyncPollInterval, ct);
+                var v = await mirror.GetStateAsync("sync-expires", ct);
+                if (v is null) return;                                                   // finished → serve current mirror
+                if (PastGrace(v, SyncTakeoverGrace)) { await mirror.ClearStateAsync("sync-expires", ct); break; }   // died → take over
+            }
+        }
+    }
 
     // -- Helpers ---------------------------------------------------------------
 
