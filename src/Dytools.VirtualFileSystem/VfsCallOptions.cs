@@ -1,14 +1,16 @@
 namespace Dytools.VirtualFileSystem;
 
-// Per-call operation options - 8 bytes, stored directly on VfsContext (no heap alloc).
-// All options default to zero, which maps to the sensible default for each field.
-//
-// Bit layout (long, 64 bits):
-//   bits 0-1   WriteMode    (0=Create, 1=Append, 2=CreateNew)
-//   bits 2-63  reserved for future options (CopyOverwrite, MoveOverwrite, ListHashDepth, etc.)
-//
-// Middleware reads options via ctx.Options; sets options via ctx.Options = ctx.Options.With*(...).
-// New per-operation parameters never require changing IVfsMiddleware or VfsPipeline signatures.
+/// <summary>
+/// Per-call operation options - 8 bytes, stored directly on <see cref="VfsContext"/> (no heap alloc).
+/// All options default to zero, which maps to the sensible default for each field.
+///
+/// Bit layout (long, 64 bits):
+///   bits 0-1   WriteMode    (0=Create, 1=Append, 2=CreateNew)
+///   bits 2-63  reserved for future options (CopyOverwrite, MoveOverwrite, ListHashDepth, etc.)
+///
+/// Middleware reads options via <c>ctx.Options</c>; sets options via <c>ctx.Options = ctx.Options.With*(...)</c>.
+/// New per-operation parameters never require changing IVfsMiddleware or VfsPipeline signatures.
+/// </summary>
 public readonly struct VfsCallOptions
 {
     private readonly long _flags;

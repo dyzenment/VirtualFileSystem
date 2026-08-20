@@ -1,22 +1,28 @@
 namespace Dytools.VirtualFileSystem;
 
-// Immutable, stack-allocated. Passed to every IVfsNode method.
-//
-// Path is the mount-relative VfsPath - a WithOffset slice of the full resolved path
-// that shares the same underlying string (zero allocation).
-//   request.Path.PathSpan   → "folder/report.pdf"   (mount-relative base, no leading '/')
-//   request.Path.StreamSpan → "thumbnail"            (ADS name)
-//   request.Path.QuerySpan  → "width=200"            (query string)
-//
-// Mount is the VFS mount prefix (e.g. "/local/c"). Stored so that the full path
-// can be reconstructed on demand for error messages:
-//   VfsPath.From(request.Mount, request.Path)
-// Nodes must not use Mount for routing decisions - Path is always mount-relative.
-//
-// CallContext is the same Dictionary instance as VfsContext.Items - a shared
-// per-call bag. Null when invoked outside the middleware pipeline.
+/// <summary>
+/// Immutable, stack-allocated. Passed to every <c>IVfsNode</c> method.
+///
+/// Path is the mount-relative <see cref="VfsPath"/> - a <see cref="VfsPath.WithOffset"/> slice of the full resolved path
+/// that shares the same underlying string (zero allocation).
+///   request.Path.PathSpan   → "folder/report.pdf"   (mount-relative base, no leading '/')
+///   request.Path.StreamSpan → "thumbnail"            (ADS name)
+///   request.Path.QuerySpan  → "width=200"            (query string)
+///
+/// Mount is the VFS mount prefix (e.g. "/local/c"). Stored so that the full path
+/// can be reconstructed on demand for error messages:
+///   <c>VfsPath.From(request.Mount, request.Path)</c>
+/// Nodes must not use Mount for routing decisions - Path is always mount-relative.
+///
+/// CallContext is the same Dictionary instance as <see cref="VfsContext.Items"/> - a shared
+/// per-call bag. Null when invoked outside the middleware pipeline.
+/// </summary>
 public readonly struct VfsNodeRequest
 {
+    /// <summary>Creates a request from a mount-relative path, its mount prefix, and the optional per-call context bag.</summary>
+    /// <param name="relativePath">The mount-relative <see cref="VfsPath"/> for this request.</param>
+    /// <param name="mount">The VFS mount prefix matched for this request.</param>
+    /// <param name="callContext">Shared per-call context bag, or null outside the pipeline.</param>
     public VfsNodeRequest(VfsPath relativePath, VfsPath mount = default, IDictionary<string, object>? callContext = null)
     {
         Path        = relativePath;

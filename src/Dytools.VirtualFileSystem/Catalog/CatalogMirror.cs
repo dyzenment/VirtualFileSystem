@@ -3,17 +3,20 @@ using System.Runtime.CompilerServices;
 
 namespace Dytools.VirtualFileSystem.Catalog;
 
-// Reusable catalog-backed namespace mirror for nodes that want fast local listings over a slow or
-// costly backend. It holds the catalog, serves listings from it, writes mutations through, and
-// keeps small sync state (a delta cursor, a "seeded" marker, a sync lease) under a reserved,
-// hidden state directory. The node decides HOW to refresh - a full re-list, or an incremental delta
-// - and drives WHEN; this type is the shared plumbing, including the atomic state primitives a node
-// uses to gate refreshes across instances (SetIfNullStateAsync + an expiring `sync-expires` lease).
-//
-// State keys are stored as INDEPENDENT reserved entries (one per key) rather than fields of a single
-// entry, so a write to one key never rewrites another - which is what makes SetIfNullStateAsync's
-// splitter correct across processes sharing one catalog. Serving and write-through are catalog
-// operations, which implementations already make safe for concurrent use.
+/// <summary>
+/// Reusable catalog-backed namespace mirror for nodes that want fast local listings over a slow or
+/// costly backend. It holds the catalog, serves listings from it, writes mutations through, and
+/// keeps small sync state (a delta cursor, a "seeded" marker, a sync lease) under a reserved,
+/// hidden state directory. The node decides HOW to refresh - a full re-list, or an incremental delta
+/// - and drives WHEN; this type is the shared plumbing, including the atomic state primitives a node
+/// uses to gate refreshes across instances (<see cref="SetIfNullStateAsync"/> + an expiring <c>sync-expires</c> lease).
+/// </summary>
+/// <remarks>
+/// State keys are stored as INDEPENDENT reserved entries (one per key) rather than fields of a single
+/// entry, so a write to one key never rewrites another - which is what makes <see cref="SetIfNullStateAsync"/>'s
+/// splitter correct across processes sharing one catalog. Serving and write-through are catalog
+/// operations, which implementations already make safe for concurrent use.
+/// </remarks>
 public sealed class CatalogMirror
 {
     // Reserved directory holding one entry per state key. Hidden from listings.
@@ -21,8 +24,10 @@ public sealed class CatalogMirror
 
     private readonly IVfsCatalog _catalog;
 
+    /// <summary>Creates a mirror backed by the given <paramref name="catalog"/>.</summary>
     public CatalogMirror(IVfsCatalog catalog) => _catalog = catalog;
 
+    /// <summary>The underlying catalog this mirror serves from and writes through to.</summary>
     public IVfsCatalog Catalog => _catalog;
 
     private static VfsPath StatePath(string key) => VfsPath.From($"{StateDir}/{key}");
@@ -35,7 +40,7 @@ public sealed class CatalogMirror
 
     // -- Serve -----------------------------------------------------------------
 
-    // Immediate children from the mirror, with the reserved state directory filtered out.
+    /// <summary>Immediate children from the mirror, with the reserved state directory filtered out.</summary>
     public async IAsyncEnumerable<CatalogEntry> ListChildrenAsync(
         VfsPath path, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -46,9 +51,11 @@ public sealed class CatalogMirror
 
     // -- Sync state (cursor, seeded marker, sync lease) - one reserved entry per key ---------------
 
+    /// <summary>Reads the value of the reserved sync-state entry <paramref name="key"/>, or null if unset.</summary>
     public async Task<string?> GetStateAsync(string key, CancellationToken ct = default)
         => (await _catalog.GetAsync(StatePath(key), ct))?.Properties.GetString("v");
 
+    /// <summary>Sets the reserved sync-state entry <paramref name="key"/> to <paramref name="value"/>.</summary>
     public Task SetStateAsync(string key, string value, CancellationToken ct = default)
         => _catalog.PutEntryAsync(new CatalogEntry
         {
@@ -57,6 +64,7 @@ public sealed class CatalogMirror
             Properties = new Dictionary<string, string?> { ["v"] = value },
         }, ct).AsTask();
 
+    /// <summary>Clears the reserved sync-state entry <paramref name="key"/>.</summary>
     public Task ClearStateAsync(string key, CancellationToken ct = default)
         => _catalog.RemoveAsync(new[] { StatePath(key) }, ct).AsTask();
 
@@ -66,16 +74,19 @@ public sealed class CatalogMirror
 
     private static int BackoffMs() => BackoffMinMs + Random.Shared.Next(0, Math.Max(1, BackoffMaxMs - BackoffMinMs + 1));
 
-    // Atomically set `key` to `value` only if it is currently absent: returns true iff this call set it,
-    // false if another caller holds it, and THROWS TimeoutException if MaxAcquireLoops rounds of backoff
-    // can't resolve the contention. A Moir-Anderson splitter over three independent registers - the
-    // target `key`, a nonce `key.x` (X), and a short self-expiring gate `key.g` (Y) - wrapped in an
-    // ADB-style retry loop: the sole splitter winner writes `key` and returns true; losers never touch
-    // `key` (so the lease is never orphaned), back off a random 2-7s, and retry. The gate carries a
-    // small expiry, so a slow loser that sets it late just lapses in GateTtl instead of wedging.
-    // Guarantees NEVER TWO (the splitter) and NEVER ZERO in the common case (the loop). `value` is
-    // opaque - expiry-based takeover of a stale `key` is the caller's business. Cancellation after we've
-    // written `key` rolls that write back (only if it still holds exactly our value).
+    /// <summary>
+    /// Atomically set <paramref name="key"/> to <paramref name="value"/> only if it is currently absent: returns true iff this call set it,
+    /// false if another caller holds it, and THROWS <see cref="TimeoutException"/> if <c>MaxAcquireLoops</c> rounds of backoff
+    /// can't resolve the contention. A Moir-Anderson splitter over three independent registers - the
+    /// target <paramref name="key"/>, a nonce <c>key.x</c> (X), and a short self-expiring gate <c>key.g</c> (Y) - wrapped in an
+    /// ADB-style retry loop: the sole splitter winner writes <paramref name="key"/> and returns true; losers never touch
+    /// <paramref name="key"/> (so the lease is never orphaned), back off a random 2-7s, and retry. The gate carries a
+    /// small expiry, so a slow loser that sets it late just lapses in <c>GateTtl</c> instead of wedging.
+    /// Guarantees NEVER TWO (the splitter) and NEVER ZERO in the common case (the loop). <paramref name="value"/> is
+    /// opaque - expiry-based takeover of a stale <paramref name="key"/> is the caller's business. Cancellation after we've
+    /// written <paramref name="key"/> rolls that write back (only if it still holds exactly our value).
+    /// </summary>
+    /// <exception cref="TimeoutException"><c>MaxAcquireLoops</c> rounds of backoff could not resolve persistent contention.</exception>
     public async Task<bool> SetIfNullStateAsync(string key, string value, CancellationToken ct = default)
     {
         var testKey = key + ".x";
@@ -125,37 +136,48 @@ public sealed class CatalogMirror
 
     // -- Write-through ---------------------------------------------------------
 
-    // ToEntry carries IsDirectory, so PutEntryAsync ensures a dir or upserts a file as appropriate.
+    /// <summary>
+    /// Write a single node through to the mirror. <c>ToEntry</c> carries <c>IsDirectory</c>, so the underlying
+    /// put ensures a dir or upserts a file as appropriate.
+    /// </summary>
     public Task UpsertAsync(VfsNodeInfo info, CancellationToken ct = default)
         => _catalog.PutEntryAsync(ToEntry(info), ct).AsTask();
 
-    // Bulk upsert - one persist for the whole set when the catalog supports it (the seeding fast path).
-    // ToEntry carries IsDirectory, so PutEntriesAsync ensures dirs and upserts files as appropriate.
+    /// <summary>
+    /// Bulk upsert - one persist for the whole set when the catalog supports it (the seeding fast path).
+    /// <c>ToEntry</c> carries <c>IsDirectory</c>, so the underlying put ensures dirs and upserts files as appropriate.
+    /// </summary>
     public Task UpsertAsync(IEnumerable<VfsNodeInfo> infos, CancellationToken ct = default)
         => _catalog.PutEntriesAsync(infos.Select(ToEntry), ct).AsTask();
 
+    /// <summary>Remove a path (and its subtree, if a directory) from the mirror.</summary>
     public async Task RemoveAsync(VfsPath path, CancellationToken ct = default)
     {
         await foreach (var _ in _catalog.RemoveAsync(path, ct)) { }   // drain the removed-file stream
     }
 
-    // Bulk remove - one persist for the whole set when the catalog supports it.
+    /// <summary>Bulk remove - one persist for the whole set when the catalog supports it.</summary>
     public Task RemoveAsync(IEnumerable<VfsPath> paths, CancellationToken ct = default)
         => _catalog.RemoveAsync(paths, ct).AsTask();
 
+    /// <summary>Re-key a mirrored path to a new location; a no-op if the source isn't mirrored.</summary>
     public async Task MoveAsync(VfsPath from, VfsPath to, CancellationToken ct = default)
     {
         if (await _catalog.GetAsync(from, ct) is not null)            // only if the source is mirrored
             await _catalog.MoveAsync(from, to, ct);
     }
 
-    // Best-effort access-time supplement for backends that don't track it: record a read against the
-    // mirror. No-ops for a path that isn't mirrored yet, and the catalog coalesces the write.
+    /// <summary>
+    /// Best-effort access-time supplement for backends that don't track it: record a read against the
+    /// mirror. No-ops for a path that isn't mirrored yet, and the catalog coalesces the write.
+    /// </summary>
     public Task TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
         => _catalog.TouchAccessedAsync(path, accessedAt, ct).AsTask();
 
-    // Wipe every mirrored entry (keeping the reserved state directory) - used before a full re-list.
-    // One bulk remove so a populated mirror isn't re-persisted per root.
+    /// <summary>
+    /// Wipe every mirrored entry (keeping the reserved state directory) - used before a full re-list.
+    /// One bulk remove so a populated mirror isn't re-persisted per root.
+    /// </summary>
     public async Task ClearAsync(CancellationToken ct = default)
     {
         var roots = new List<VfsPath>();
@@ -167,6 +189,7 @@ public sealed class CatalogMirror
 
     // -- Conversions -----------------------------------------------------------
 
+    /// <summary>Projects a <see cref="CatalogEntry"/> to the <see cref="VfsNodeInfo"/> a node exposes.</summary>
     public static VfsNodeInfo ToNodeInfo(CatalogEntry e) => new()
     {
         RelativePath = e.Path,

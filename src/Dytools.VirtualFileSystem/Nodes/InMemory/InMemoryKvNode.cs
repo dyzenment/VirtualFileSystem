@@ -4,15 +4,18 @@ using Dytools.VirtualFileSystem;
 
 namespace Dytools.VirtualFileSystem.Nodes.InMemory;
 
-// Thread-safe in-memory key-value node.
-// Keys are normalised relative paths. Values are raw byte arrays.
-// ADS (StreamName) is supported - stored as a distinct key: "path:streamName".
-// QueryString is ignored - in-memory storage has no concept of query parameters.
-//
-// Read path (OpenReadAsync, ExistsAsync, GetInfoAsync) is zero-alloc on .NET 9+:
-//   the key is built into a stackalloc buffer and looked up via
-//   Dictionary.GetAlternateLookup<ReadOnlySpan<char>>().
-// Write path allocates one string for the dictionary key.
+/// <summary>
+/// Thread-safe in-memory key-value node.
+/// Keys are normalised relative paths. Values are raw byte arrays.
+/// ADS (<c>StreamName</c>) is supported - stored as a distinct key: <c>"path:streamName"</c>.
+/// <c>QueryString</c> is ignored - in-memory storage has no concept of query parameters.
+/// <para>
+/// Read path (<see cref="OpenReadAsync"/>, <c>ExistsAsync</c>, <see cref="GetInfoAsync"/>) is zero-alloc on
+/// .NET 9+: the key is built into a stackalloc buffer and looked up via
+/// <c>Dictionary.GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;()</c>.
+/// Write path allocates one string for the dictionary key.
+/// </para>
+/// </summary>
 public sealed class InMemoryKvNode : VfsNodeBase
 {
     // Dictionary rather than ConcurrentDictionary - GetAlternateLookup requires it.
@@ -22,8 +25,10 @@ public sealed class InMemoryKvNode : VfsNodeBase
     // Cached AlternateLookup - valid for the lifetime of _store (same dictionary instance).
     private readonly Dictionary<string, byte[]>.AlternateLookup<ReadOnlySpan<char>> _lookup;
 
+    /// <summary>Creates an empty in-memory node.</summary>
     public InMemoryKvNode() => _lookup = _store.GetAlternateLookup<ReadOnlySpan<char>>();
 
+    /// <inheritdoc/>
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         Span<char> buf = stackalloc char[VfsPath.MaxLength];
@@ -40,6 +45,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         finally { _lock.ExitReadLock(); }
     }
 
+    /// <inheritdoc/>
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
         var key = BuildKey(request.Path.PathSpan, request.Path.StreamSpan); // one string alloc for writes
@@ -65,6 +71,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         finally { _lock.ExitWriteLock(); }
     }
 
+    /// <inheritdoc/>
     public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var key = BuildKey(request.Path.PathSpan, request.Path.StreamSpan);
@@ -74,6 +81,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc/>
     public override Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         Span<char> buf = stackalloc char[VfsPath.MaxLength];
@@ -93,6 +101,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc/>
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         var srcKey = BuildKey(src.Path.PathSpan, src.Path.StreamSpan);
@@ -107,6 +116,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc/>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -158,6 +168,7 @@ public sealed class InMemoryKvNode : VfsNodeBase
         }
     }
 
+    /// <inheritdoc/>
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         Span<char> buf = stackalloc char[VfsPath.MaxLength];

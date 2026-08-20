@@ -2,50 +2,64 @@ using Dytools.VirtualFileSystem.Internal;
 
 namespace Dytools.VirtualFileSystem.Middleware;
 
-// Follows node-level symlinks during Read, Write, and GetInfo operations.
-//
-// A node signals a symlink by returning VfsPropertyKeys.SymlinkTarget in
-// VfsNodeInfo.Properties from GetInfoAsync. The value is the absolute VFS path
-// of the target. This middleware peeks at node info and, if a target is present,
-// calls ctx.Reroute() to redirect the context before passing to next().
-//
-// PERFORMANCE - skipping nodes that never produce symlinks:
-//   By default this middleware only calls GetInfoAsync on nodes that implement
-//   ISymlinkCapableNode. Nodes that do not implement it are passed through
-//   without any additional I/O. To also enable symlink checking on specific
-//   types that cannot implement ISymlinkCapableNode (e.g. third-party nodes),
-//   pass their types to the constructor:
-//       new SymlinkMiddleware(typeof(ThirdPartyNode))
-//
-// STREAM CACHING - avoiding double-open in magic-header nodes:
-//   Some nodes must open a stream to detect a symlink (magic header approach).
-//   To avoid opening the stream again for the actual Read, nodes can store a
-//   seekable stream in request.CallContext[VfsPropertyKeys.CachedReadStream]
-//   during GetInfoAsync. This middleware returns the cached stream directly from
-//   InvokeReadAsync instead of calling next() - exactly one I/O per read.
-//
-// SYMLINK SEMANTICS (mirrors Unix):
-//   Read    - follows the symlink (reads from target)
-//   Write   - follows the symlink (writes through to target)
-//   GetInfo - follows the symlink (reports target metadata)
-//   Delete  - does NOT follow (deletes the pointer file, not the target)
-//   Exists  - does NOT follow (checks whether the pointer file itself exists)
-//   List    - does NOT follow (lists the directory containing the pointer)
-//
-// Register via IVfsBuilder.UseSymlinks() or .Use(new SymlinkMiddleware()).
+/// <summary>
+/// Follows node-level symlinks during Read, Write, and GetInfo operations.
+/// <para>
+/// A node signals a symlink by returning <see cref="VfsPropertyKeys.SymlinkTarget"/> in
+/// <see cref="VfsNodeInfo"/>.Properties from GetInfoAsync. The value is the absolute VFS path
+/// of the target. This middleware peeks at node info and, if a target is present,
+/// calls ctx.Reroute() to redirect the context before passing to next().
+/// </para>
+/// <para>
+/// PERFORMANCE - skipping nodes that never produce symlinks:
+/// By default this middleware only calls GetInfoAsync on nodes that implement
+/// ISymlinkCapableNode. Nodes that do not implement it are passed through
+/// without any additional I/O. To also enable symlink checking on specific
+/// types that cannot implement ISymlinkCapableNode (e.g. third-party nodes),
+/// pass their types to the constructor:
+/// <c>new SymlinkMiddleware(typeof(ThirdPartyNode))</c>
+/// </para>
+/// <para>
+/// STREAM CACHING - avoiding double-open in magic-header nodes:
+/// Some nodes must open a stream to detect a symlink (magic header approach).
+/// To avoid opening the stream again for the actual Read, nodes can store a
+/// seekable stream in <c>request.CallContext[VfsPropertyKeys.CachedReadStream]</c>
+/// during GetInfoAsync. This middleware returns the cached stream directly from
+/// <see cref="InvokeReadAsync"/> instead of calling next() - exactly one I/O per read.
+/// </para>
+/// <para>
+/// SYMLINK SEMANTICS (mirrors Unix):
+/// <list type="bullet">
+///   <item>Read    - follows the symlink (reads from target)</item>
+///   <item>Write   - follows the symlink (writes through to target)</item>
+///   <item>GetInfo - follows the symlink (reports target metadata)</item>
+///   <item>Delete  - does NOT follow (deletes the pointer file, not the target)</item>
+///   <item>Exists  - does NOT follow (checks whether the pointer file itself exists)</item>
+///   <item>List    - does NOT follow (lists the directory containing the pointer)</item>
+/// </list>
+/// </para>
+/// Register via IVfsBuilder.UseSymlinks() or <c>.Use(new SymlinkMiddleware())</c>.
+/// </summary>
 public sealed class SymlinkMiddleware : IVfsMiddleware
 {
     private readonly IReadOnlySet<Type>? _extraNodeTypes;
     private const    int                 MaxDepth = 20;
 
-    // Default: only check nodes that implement ISymlinkCapableNode.
+    /// <summary>Default: only check nodes that implement ISymlinkCapableNode.</summary>
     public SymlinkMiddleware() { }
 
-    // Also enable symlink checking for specific node types that you cannot
-    // modify to implement ISymlinkCapableNode (e.g. third-party nodes).
+    /// <summary>
+    /// Also enable symlink checking for specific node types that you cannot
+    /// modify to implement ISymlinkCapableNode (e.g. third-party nodes).
+    /// </summary>
+    /// <param name="extraNodeTypes">Extra node types to treat as symlink-capable.</param>
     public SymlinkMiddleware(params Type[] extraNodeTypes)
         => _extraNodeTypes = extraNodeTypes.Length > 0 ? new HashSet<Type>(extraNodeTypes) : null;
 
+    /// <summary>
+    /// Follows any symlink on the resolved node, then invokes the read pipeline. The node's
+    /// OpenReadAsync may return a stream it cached during GetInfoAsync (see stream caching).
+    /// </summary>
     public async Task<Stream?> InvokeReadAsync(
         VfsContext ctx,
         Func<VfsContext, CancellationToken, Task<Stream?>> next,
@@ -61,6 +75,10 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         return await next(ctx, ct);
     }
 
+    /// <summary>
+    /// Follows any symlink on the resolved node, then invokes the write pipeline (writes through
+    /// to the target).
+    /// </summary>
     public async Task<Stream> InvokeWriteAsync(
         VfsContext ctx,
         Func<VfsContext, CancellationToken, Task<Stream>> next,
@@ -70,6 +88,10 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         return await next(ctx, ct);
     }
 
+    /// <summary>
+    /// Follows any symlink on the resolved node, then invokes the get-info pipeline (reports the
+    /// target's metadata).
+    /// </summary>
     public async Task<VfsNodeInfo?> InvokeGetInfoAsync(
         VfsContext ctx,
         Func<VfsContext, CancellationToken, Task<VfsNodeInfo?>> next,

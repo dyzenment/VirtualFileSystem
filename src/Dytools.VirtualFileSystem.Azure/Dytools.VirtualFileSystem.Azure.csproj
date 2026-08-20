@@ -4,7 +4,6 @@
     <RootNamespace>Dytools.VirtualFileSystem.Nodes.Azure</RootNamespace>
     <AssemblyName>Dytools.VirtualFileSystem.Azure</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <!-- NuGet package metadata -->

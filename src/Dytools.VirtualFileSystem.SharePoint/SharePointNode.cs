@@ -11,23 +11,29 @@ using Microsoft.Extensions.Logging;
 
 namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 
-// Mounts a SharePoint / OneDrive document library (a Graph "drive") as a VFS path, talking to
-// Microsoft Graph over raw HttpClient. You supply the access token via ISharePointTokenProvider;
-// this node never sees credentials.
-//
-// Paths address items by path: drives/{driveId}/root:/{path}:. Folders are real, so listing and
-// recursion work naturally. Append is not supported (items are rewritten whole). Beyond the
-// standard operations it exposes a delta change feed via GetCapability<ISharePointChangeFeed>.
-//
-// Optional caching catalog (UseSharePointCachingCatalog): mirror the drive's structure into an
-// IVfsCatalog. Directory listings then serve from the local catalog after a fast incremental delta
-// sync - the fix for SharePoint's notoriously slow listing of large libraries. Reads and mutations
-// still hit SharePoint directly and keep the mirror current.
-//
-//   services.AddSingleton<ISharePointTokenProvider, MyTokenBridge>();
-//   services.AddVirtualFileSystem()
-//       .MountSingleton<SharePointNode>("/team",
-//           o => o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog());
+/// <summary>
+/// Mounts a SharePoint / OneDrive document library (a Graph "drive") as a VFS path, talking to
+/// Microsoft Graph over raw <see cref="HttpClient"/>. You supply the access token via
+/// <see cref="ISharePointTokenProvider"/>; this node never sees credentials.
+/// <para>
+/// Paths address items by path: <c>drives/{driveId}/root:/{path}:</c>. Folders are real, so listing
+/// and recursion work naturally. Append is not supported (items are rewritten whole). Beyond the
+/// standard operations it exposes a delta change feed via
+/// <c>GetCapability&lt;ISharePointChangeFeed&gt;</c>.
+/// </para>
+/// <para>
+/// Optional caching catalog (UseSharePointCachingCatalog): mirror the drive's structure into an
+/// <c>IVfsCatalog</c>. Directory listings then serve from the local catalog after a fast incremental
+/// delta sync - the fix for SharePoint's notoriously slow listing of large libraries. Reads and
+/// mutations still hit SharePoint directly and keep the mirror current.
+/// </para>
+/// <code>
+///   services.AddSingleton&lt;ISharePointTokenProvider, MyTokenBridge&gt;();
+///   services.AddVirtualFileSystem()
+///       .MountSingleton&lt;SharePointNode&gt;("/team",
+///           o =&gt; o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog());
+/// </code>
+/// </summary>
 public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalogMirror
 {
     private const long SmallUploadLimit = 4L * 1024 * 1024;        // Graph: single-PUT ceiling
@@ -45,8 +51,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     private readonly SemaphoreSlim  _driveIdGate = new(1, 1);
     private          string?        _driveId;     // known up-front, or resolved + cached on first use
 
-    // Activated by MountSingleton<SharePointNode>. Targets a drive by id (UseSharePointDrive) or
-    // resolves it from a site + library at runtime (UseSharePointSite).
+    /// <summary>
+    /// Activated by <c>MountSingleton&lt;SharePointNode&gt;</c>. Targets a drive by id
+    /// (UseSharePointDrive) or resolves it from a site + library at runtime (UseSharePointSite).
+    /// </summary>
     public SharePointNode(VfsMountOptions options, ISharePointTokenProvider tokens, IServiceProvider services)
         : this(GraphHttp.CreateClient(tokens), Opt(options),
                ResolveMirror(options, services),
@@ -60,12 +68,14 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
-    // Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
-    // already attaches auth, targeting a drive by id.
+    /// <summary>
+    /// Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
+    /// already attaches auth, targeting a drive by id.
+    /// </summary>
     public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, CatalogMirror? mirror = null)
         : this(graphClient, new SharePointOptions { DriveId = driveId, RootPath = rootPath }, mirror, null) { }
 
-    // Advanced / test seam: resolve the drive from a site address + library name.
+    /// <summary>Advanced / test seam: resolve the drive from a site address + library name.</summary>
     public static SharePointNode ForSite(
         HttpClient graphClient, string sitePath, string? libraryName = null,
         string? rootPath = null, CatalogMirror? mirror = null, ILogger? logger = null)
@@ -89,7 +99,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     private static SharePointOptions Opt(VfsMountOptions o) => o.Require<SharePointOptions>();
 
-    // SharePoint item names are case-insensitive.
+    /// <summary>SharePoint item names are case-insensitive.</summary>
     protected override bool IsCaseSensitive => false;
 
     // -- Drive id (direct, or resolved from a site) ----------------------------
@@ -149,6 +159,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Read ------------------------------------------------------------------
 
+    /// <summary>
+    /// Opens the item's content for reading, or returns null if it does not exist (reconciling a
+    /// stale mirror entry when caching).
+    /// </summary>
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -167,6 +181,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Write -----------------------------------------------------------------
 
+    /// <summary>
+    /// Opens a write stream that uploads the whole item on close. Append is not supported.
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// Thrown when <paramref name="mode"/> is <see cref="VfsWriteMode.Append"/>; SharePoint items
+    /// cannot be appended to and must be rewritten whole.
+    /// </exception>
     public override Task<Stream> OpenWriteAsync(
         VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
@@ -234,6 +255,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Delete / Rename / Move (native, catalog kept in step) -----------------
 
+    /// <summary>Deletes the item (no-op if already gone), keeping any mirror in step.</summary>
     public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -242,6 +264,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
     }
 
+    /// <summary>Renames the item in place, keeping any mirror in step.</summary>
     public override async Task RenameAsync(VfsNodeRequest src, string newName, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -250,6 +273,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         if (_mirror is not null) await _mirror.MoveAsync(src.Path, src.Path.WithName(newName), ct);
     }
 
+    /// <summary>Moves (and possibly renames) the item to a new parent, keeping any mirror in step.</summary>
     public override async Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -272,6 +296,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Metadata --------------------------------------------------------------
 
+    /// <summary>
+    /// Fetches metadata for the item, or null if it does not exist (reconciling a stale mirror entry
+    /// when caching). Refreshes the mirror on a hit.
+    /// </summary>
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -292,8 +320,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Listing ---------------------------------------------------------------
 
-    // With a caching catalog: sync once (incremental delta), then let the base engine serve the
-    // whole (possibly recursive, filtered) listing from the catalog with no further network calls.
+    /// <summary>
+    /// With a caching catalog: sync once (incremental delta), then let the base engine serve the
+    /// whole (possibly recursive, filtered) listing from the catalog with no further network calls.
+    /// </summary>
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -303,8 +333,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
             yield return info;
     }
 
-    // Single-level children: from the mirror when caching (sync already ran in ListAsync), else
-    // straight from Graph /children.
+    /// <summary>
+    /// Single-level children: from the mirror when caching (sync already ran in <see cref="ListAsync"/>),
+    /// else straight from Graph /children.
+    /// </summary>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -335,6 +367,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Delta change feed (ISharePointChangeFeed) -----------------------------
 
+    /// <inheritdoc/>
     public async Task<SharePointChangeBatch> GetChangesAsync(string? cursor, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
@@ -389,8 +422,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // -- Catalog mirror sync ---------------------------------------------------
 
-    // Force a delta sync of the mirror (ICatalogMirror). Listing already syncs, so this is for
-    // callers that want an explicit refresh without listing.
+    /// <summary>
+    /// Force a delta sync of the mirror (<c>ICatalogMirror</c>). Listing already syncs, so this is for
+    /// callers that want an explicit refresh without listing.
+    /// </summary>
     public Task RefreshAsync(CancellationToken ct = default) => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
 
     // Cross-instance sync gate (sizing is deliberately generous; re-up per page means the TTL only has

@@ -5,25 +5,36 @@ using Dytools.VirtualFileSystem;
 
 namespace Dytools.VirtualFileSystem.Nodes.LocalFs;
 
-// Mounts a local directory as a VFS path.
-// Native CopyAsync and MoveAsync use File.Copy / File.Move - no data read into memory.
-// ADS (StreamName in VfsNodeRequest) is supported on Windows/NTFS natively via FileStream.
-// On Linux/macOS, ADS paths are passed through to the OS, which will reject them.
-//
-// OS-level symlinks (NTFS reparse points, Unix symlinks) are surfaced in
-// VfsNodeInfo.Properties[VfsPropertyKeys.PhysicalSymlink] - not in VfsNodeInfo itself,
-// since IsAliased and IsSymlink are set by the VFS core, not the node.
-//
-// Usage:
-//   .Mount("/local/c",  sp => new LocalFsNode(@"C:\"))
-//   .Mount("/tmp",      sp => new LocalFsNode(Path.GetTempPath()))
+/// <summary>
+/// Mounts a local directory as a VFS path.
+/// Native <see cref="CopyAsync"/> and <see cref="MoveAsync"/> use <see cref="File.Copy(string, string)"/> /
+/// <see cref="File.Move(string, string)"/> - no data read into memory.
+/// ADS (<c>StreamName</c> in <see cref="VfsNodeRequest"/>) is supported on Windows/NTFS natively via
+/// <see cref="FileStream"/>. On Linux/macOS, ADS paths are passed through to the OS, which will reject them.
+/// <para>
+/// OS-level symlinks (NTFS reparse points, Unix symlinks) are surfaced in
+/// <c>VfsNodeInfo.Properties[VfsPropertyKeys.PhysicalSymlink]</c> - not in <see cref="VfsNodeInfo"/> itself,
+/// since <c>IsAliased</c> and <c>IsSymlink</c> are set by the VFS core, not the node.
+/// </para>
+/// </summary>
+/// <remarks>
+/// Usage:
+/// <code>
+///   .Mount("/local/c",  sp => new LocalFsNode(@"C:\"))
+///   .Mount("/tmp",      sp => new LocalFsNode(Path.GetTempPath()))
+/// </code>
+/// </remarks>
 public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 {
     private readonly string _root = Path.GetFullPath(rootPath);
 
-    // Activated by MountSingleton/Scoped/Transient<LocalFsNode> from the configured options.
+    /// <summary>
+    /// Creates a node from mount options. Activated by
+    /// <c>MountSingleton</c>/<c>Scoped</c>/<c>Transient&lt;LocalFsNode&gt;</c> from the configured options.
+    /// </summary>
     public LocalFsNode(VfsMountOptions options) : this(options.Require<LocalFsOptions>().RootPath) { }
 
+    /// <inheritdoc/>
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var physical = Resolve(request);
@@ -33,6 +44,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.FromResult<Stream?>(stream);
     }
 
+    /// <inheritdoc/>
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
         var physical = Resolve(request);
@@ -48,6 +60,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.FromResult(stream);
     }
 
+    /// <inheritdoc/>
     public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var physical = Resolve(request);
@@ -56,6 +69,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc/>
     public override Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         var pSrc = Resolve(src);
@@ -65,6 +79,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc/>
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         var pSrc = Resolve(src);
@@ -75,11 +90,13 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         return Task.CompletedTask;
     }
 
-    // Native listing: recursion, search pattern, kind, and hidden filtering all resolve in a
-    // single OS-level enumeration. Attributes/size/timestamps come straight off the walk (no
-    // per-entry re-stat), and the pattern is matched by the runtime's own simple-glob matcher.
-    // The base VfsNodeBase engine (over ListDirectoryAsync) remains the fallback for backends
-    // that can't push these down.
+    /// <summary>
+    /// Native listing: recursion, search pattern, kind, and hidden filtering all resolve in a
+    /// single OS-level enumeration. Attributes/size/timestamps come straight off the walk (no
+    /// per-entry re-stat), and the pattern is matched by the runtime's own simple-glob matcher.
+    /// The base <see cref="VfsNodeBase"/> engine (over <see cref="ListDirectoryAsync"/>) remains the
+    /// fallback for backends that can't push these down.
+    /// </summary>
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options,
         [EnumeratorCancellation] CancellationToken ct = default)
@@ -125,8 +142,10 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         }
     }
 
-    // Single-level primitive: satisfies the base contract and backs any caller that reaches
-    // for it, though LocalFs's own listing goes through the native ListAsync above.
+    /// <summary>
+    /// Single-level primitive: satisfies the base contract and backs any caller that reaches
+    /// for it, though LocalFs's own listing goes through the native <see cref="ListAsync"/> above.
+    /// </summary>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -161,9 +180,11 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         };
     }
 
+    /// <inheritdoc/>
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
         => Task.FromResult(GetInfoInternal(request));
 
+    /// <inheritdoc/>
     public override Task<bool> ExistsAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var physical = Resolve(request);

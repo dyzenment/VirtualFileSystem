@@ -2,14 +2,18 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Dytools.VirtualFileSystem.Catalog;
 
+/// <summary>Dependency-injection registration helpers for the built-in JSON-backed <see cref="IVfsCatalog"/>.</summary>
 public static class CatalogServiceCollectionExtensions
 {
-    // Registers the built-in durable JSON catalog as IVfsCatalog. `store` supplies the node
-    // it persists into (e.g. sp => sp.NodeAt("/disk/catalog")). Pass a serviceKey to register
-    // several catalogs side by side and select them per mount via catalogServiceKey.
-    //
-    //   services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"));
-    //   services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/arch"), serviceKey: "archive");
+    /// <summary>
+    /// Registers the built-in durable JSON catalog as <see cref="IVfsCatalog"/>. <paramref name="store"/> supplies the node
+    /// it persists into (e.g. <c>sp =&gt; sp.NodeAt("/disk/catalog")</c>). Pass a <paramref name="serviceKey"/> to register
+    /// several catalogs side by side and select them per mount via <c>catalogServiceKey</c>.
+    /// <code>
+    ///   services.AddVfsJsonCatalog(sp =&gt; sp.NodeAt("/disk/catalog"));
+    ///   services.AddVfsJsonCatalog(sp =&gt; sp.NodeAt("/disk/arch"), serviceKey: "archive");
+    /// </code>
+    /// </summary>
     public static IServiceCollection AddVfsJsonCatalog(
         this IServiceCollection services,
         Func<IServiceProvider, IVfsNode> store,

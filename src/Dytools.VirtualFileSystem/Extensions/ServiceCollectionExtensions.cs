@@ -3,18 +3,27 @@ using Dytools.VirtualFileSystem.Internal;
 
 namespace Dytools.VirtualFileSystem.Extensions;
 
+/// <summary>
+/// Dependency-injection entry points for registering the virtual file system.
+/// </summary>
 public static class ServiceCollectionExtensions
 {
-    // Program.cs:
-    //   builder.Services
-    //       .AddVirtualFileSystem()
-    //       .Use<UserIdentityMiddleware>()               // first - sets user for all others
-    //       .UseSymlinks()                               // enable node-level symlink following
-    //       .AddRewriter(p => p.Replace(@"C:\", "/local/c/"))
-    //       .Mount("/local/c",  sp => new LocalFsNode(@"C:\"))
-    //       .Mount("/tmp",      sp => new LocalFsNode(Path.GetTempPath()))
-    //       .Mount("/kv",       sp => new InMemoryKvNode())
-    //       .Alias("/logs",     "/local/c/app/logs");
+    /// <summary>
+    /// Registers the virtual file system services and returns an <see cref="IVfsBuilder"/> for
+    /// configuring middleware, mounts, and aliases.
+    /// <code>
+    /// // Program.cs:
+    ///   builder.Services
+    ///       .AddVirtualFileSystem()
+    ///       .Use&lt;UserIdentityMiddleware&gt;()               // first - sets user for all others
+    ///       .UseSymlinks()                               // enable node-level symlink following
+    ///       .AddRewriter(p =&gt; p.Replace(@"C:\", "/local/c/"))
+    ///       .Mount("/local/c",  sp =&gt; new LocalFsNode(@"C:\"))
+    ///       .Mount("/tmp",      sp =&gt; new LocalFsNode(Path.GetTempPath()))
+    ///       .Mount("/kv",       sp =&gt; new InMemoryKvNode())
+    ///       .Alias("/logs",     "/local/c/app/logs");
+    /// </code>
+    /// </summary>
     public static IVfsBuilder AddVirtualFileSystem(this IServiceCollection services)
     {
         var opts = new VfsOptions();
@@ -61,10 +70,14 @@ public static class ServiceCollectionExtensions
         return new VfsBuilder(services, opts);
     }
 
-    // Optional. The registry self-populates from the options on first use, so this is
-    // no longer required. Call it at startup if you'd rather build the mounts (and
-    // surface any mount-factory errors) eagerly instead of on the first VFS operation:
-    //   app.Services.InitializeVirtualFileSystem();   // forces the registry to build now
+    /// <summary>
+    /// Optional. The registry self-populates from the options on first use, so this is
+    /// no longer required. Call it at startup if you'd rather build the mounts (and
+    /// surface any mount-factory errors) eagerly instead of on the first VFS operation:
+    /// <code>
+    ///   app.Services.InitializeVirtualFileSystem();   // forces the registry to build now
+    /// </code>
+    /// </summary>
     public static void InitializeVirtualFileSystem(this IServiceProvider services)
         => services.GetRequiredService<IVfsMountRegistry>();
 

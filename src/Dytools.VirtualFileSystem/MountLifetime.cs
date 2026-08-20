@@ -1,15 +1,17 @@
 namespace Dytools.VirtualFileSystem;
 
-// How often a factory-mounted node is built, and against which DI scope.
+/// <summary>How often a factory-mounted node is built, and against which DI scope.</summary>
 public enum MountLifetime
 {
-    // One node for the app, built once from the root provider.
+    /// <summary>One node for the app, built once from the root provider.</summary>
     Singleton,
 
-    // One node per DI scope - in a web request, the request scope - so the node
-    // shares that scope's services (e.g. a DbContext). Reused within the scope.
+    /// <summary>
+    /// One node per DI scope - in a web request, the request scope - so the node
+    /// shares that scope's services (e.g. a DbContext). Reused within the scope.
+    /// </summary>
     Scoped,
 
-    // A fresh node per operation. Its scoped dependencies still come from the caller's scope.
+    /// <summary>A fresh node per operation. Its scoped dependencies still come from the caller's scope.</summary>
     Transient,
 }

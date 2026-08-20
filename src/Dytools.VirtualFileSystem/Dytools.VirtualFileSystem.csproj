@@ -4,8 +4,6 @@
     <RootNamespace>Dytools.VirtualFileSystem</RootNamespace>
     <AssemblyName>Dytools.VirtualFileSystem</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <!-- Don't warn on undocumented public members -->
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <!-- NuGet package metadata -->

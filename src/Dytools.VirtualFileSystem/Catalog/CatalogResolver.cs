@@ -2,11 +2,20 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Dytools.VirtualFileSystem.Catalog;
 
-// Resolves an IVfsCatalog from DI by service key + partition. Takes plain values, not mount options,
-// so nodes stay in control: a node reads its own CatalogSelection and passes the values here. Throws
-// if no catalog is registered, or a partition is requested from a non-partitionable catalog.
+/// <summary>
+/// Resolves an <see cref="IVfsCatalog"/> from DI by service key + partition. Takes plain values, not mount options,
+/// so nodes stay in control: a node reads its own <see cref="CatalogSelection"/> and passes the values here. Throws
+/// if no catalog is registered, or a partition is requested from a non-partitionable catalog.
+/// </summary>
 public static class CatalogResolver
 {
+    /// <summary>
+    /// Resolves the <see cref="IVfsCatalog"/> registered under <paramref name="serviceKey"/> (null = default), optionally
+    /// narrowed to <paramref name="partition"/> (null = un-partitioned view).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// No catalog is registered, or a partition is requested from a catalog that does not implement <see cref="IPartitionedVfsCatalog"/>.
+    /// </exception>
     public static IVfsCatalog Resolve(IServiceProvider services, object? serviceKey, string? partition)
     {
         var catalog = serviceKey is null

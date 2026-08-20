@@ -9,23 +9,31 @@ using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.Azure;
 
-// Mounts Azure Blob Storage as a VFS path, in one of two modes:
-//
-//   Fixed container  - new AzureBlobNode(containerClient, prefix?)
-//                      the mount-relative path is the blob name, optionally prefixed.
-//   Account-wide     - new AzureBlobNode(blobServiceClient)
-//                      the FIRST path segment selects the container, the rest is the blob
-//                      name. Mount "/azure" and address any container: /azure/<container>/<blob>.
-//
-// Azure SDK clients are immutable, thread-safe, and meant to be shared as singletons.
-//
-// Blob storage is a flat namespace with '/' separators, so "folders" are virtual -
-// ListAsync uses GetBlobsByHierarchy with a '/' delimiter to surface them as directories
-// (and, in account-wide mode, lists containers at the mount root).
-//
-// Native block-blob streams back OpenReadAsync/OpenWriteAsync directly. Append mode stages
-// then rewrites a block blob. CopyAsync uses the base stream-copy fallback so it works
-// under every auth mode.
+/// <summary>
+/// Mounts Azure Blob Storage as a VFS path, in one of two modes:
+/// <list type="bullet">
+///   <item><description>
+///     Fixed container - <c>new AzureBlobNode(containerClient, prefix?)</c>:
+///     the mount-relative path is the blob name, optionally prefixed.
+///   </description></item>
+///   <item><description>
+///     Account-wide - <c>new AzureBlobNode(blobServiceClient)</c>:
+///     the FIRST path segment selects the container, the rest is the blob
+///     name. Mount <c>"/azure"</c> and address any container: <c>/azure/&lt;container&gt;/&lt;blob&gt;</c>.
+///   </description></item>
+/// </list>
+/// <para>Azure SDK clients are immutable, thread-safe, and meant to be shared as singletons.</para>
+/// <para>
+/// Blob storage is a flat namespace with '/' separators, so "folders" are virtual -
+/// <see cref="ListAsync"/> uses <c>GetBlobsByHierarchy</c> with a '/' delimiter to surface them as directories
+/// (and, in account-wide mode, lists containers at the mount root).
+/// </para>
+/// <para>
+/// Native block-blob streams back <see cref="OpenReadAsync"/>/<see cref="OpenWriteAsync"/> directly. Append mode stages
+/// then rewrites a block blob. <c>CopyAsync</c> uses the base stream-copy fallback so it works
+/// under every auth mode.
+/// </para>
+/// </summary>
 public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
 {
     private readonly BlobServiceClient?   _service;    // account-wide mode
@@ -35,6 +43,11 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
 
     private bool AccountWide => _container is null;
 
+    /// <summary>Creates a node in fixed-container mode over the given container, optionally rooted at a path prefix.</summary>
+    /// <param name="container">The container client to mount.</param>
+    /// <param name="pathPrefix">Optional path prefix the mount is rooted at; leading/trailing slashes are trimmed.</param>
+    /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
     public AzureBlobNode(BlobContainerClient container, string? pathPrefix = null, CatalogMirror? mirror = null)
     {
         _container = container ?? throw new ArgumentNullException(nameof(container));
@@ -42,6 +55,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         _mirror    = mirror;
     }
 
+    /// <summary>Creates a node in account-wide mode: the first path segment selects the container, the rest is the blob name.</summary>
+    /// <param name="service">The blob service client to mount.</param>
+    /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="service"/> is <c>null</c>.</exception>
     public AzureBlobNode(BlobServiceClient service, CatalogMirror? mirror = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
@@ -49,8 +66,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         _mirror  = mirror;
     }
 
-    // Activated by MountSingleton<AzureBlobNode> from the configured options + DI client.
-    // No container in the options → account-wide mode.
+    /// <summary>
+    /// Activated by <c>MountSingleton&lt;AzureBlobNode&gt;</c> from the configured options + DI client.
+    /// No container in the options means account-wide mode.
+    /// </summary>
     public AzureBlobNode(VfsMountOptions options, BlobServiceClient service, IServiceProvider services)
     {
         var o = options.Require<AzureBlobOptions>();
@@ -75,6 +94,8 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
+    /// <summary>Opens the blob for reading, or returns <c>null</c> if it does not exist (or the path is not a blob).</summary>
+    /// <returns>A readable stream over the blob's contents, or <c>null</c> when the blob is not found.</returns>
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var (container, name) = Locate(Rel(request));
@@ -94,6 +115,15 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         }
     }
 
+    /// <summary>
+    /// Opens a write stream for the blob. <see cref="VfsWriteMode.Append"/> stages existing content then rewrites
+    /// the whole block blob on close; other modes stream directly to a block blob.
+    /// </summary>
+    /// <returns>A writable stream that commits the blob when disposed.</returns>
+    /// <exception cref="IOException">
+    /// The path addresses a container or the mount root rather than a blob, or <paramref name="mode"/> is
+    /// <see cref="VfsWriteMode.CreateNew"/> and the blob already exists.
+    /// </exception>
     public override async Task<Stream> OpenWriteAsync(
         VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
@@ -151,6 +181,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         return await block.OpenWriteAsync(overwrite: true, cancellationToken: ct);
     }
 
+    /// <summary>Deletes the blob (including snapshots) and removes it from the mirror. No-op when the path is not a blob.</summary>
     public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var (container, name) = Locate(Rel(request));
@@ -171,13 +202,17 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         });
     }
 
-    // Blob names are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed down -
-    // it forces a full container scan (unless a mirror serves the listing locally).
+    /// <summary>Blob names are case-sensitive.</summary>
     protected override bool IsCaseSensitive => true;
+
+    /// <summary>
+    /// A non-prefix pattern (e.g. <c>"*.pdf"</c>) cannot be pushed down - it forces a full container
+    /// scan (unless a mirror serves the listing locally).
+    /// </summary>
     protected override bool RequiresFullScan(VfsListOptions options)
         => _mirror is null && !IsPurePrefixPattern(options.SearchPattern);
 
-    // With a mirror: seed once, then serve every listing (incl. recursive) from the local catalog.
+    /// <summary>With a mirror: seed once, then serve every listing (incl. recursive) from the local catalog.</summary>
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -186,6 +221,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
             yield return info;
     }
 
+    /// <summary>
+    /// Lists the immediate children of a directory: from the mirror when present, the account's containers at
+    /// an account-wide mount root, otherwise a hierarchical blob listing that surfaces prefixes as directories.
+    /// </summary>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -242,6 +281,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         }
     }
 
+    /// <summary>
+    /// Returns metadata for the blob at the path, a directory entry for an existing container or when child
+    /// blobs exist under it, or <c>null</c> when nothing matches. The mount root is always reported as a directory.
+    /// </summary>
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var rel = Rel(request);
@@ -285,7 +328,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
 
     // -- Catalog mirror (ICatalogMirror) ---------------------------------------
 
-    // Force a re-sync of the mirror against the store (picks up changes made outside this VFS).
+    /// <summary>Force a re-sync of the mirror against the store (picks up changes made outside this VFS).</summary>
     public Task RefreshAsync(CancellationToken ct = default) => ResyncAsync(ct);
 
     private async Task EnsureSeededAsync(CancellationToken ct)

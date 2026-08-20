@@ -9,22 +9,30 @@ using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.S3;
 
-// Mounts an Amazon S3 bucket (optionally rooted at a key prefix) as a VFS path.
-//
-// The node wraps a caller-supplied IAmazonS3 client. AWS SDK clients are thread-safe
-// and intended to live for the lifetime of the application, so a single client shared
-// across the app (registered as a singleton) is the recommended usage.
-//
-// Path mapping: the mount-relative VFS path becomes the S3 object key, optionally
-// prefixed. S3 is a flat key space with '/' separators, so "folders" are virtual -
-// ListAsync uses a '/' delimiter to surface them as directories.
-//
-// Native CopyAsync uses S3 CopyObject (server-side, no bytes through the client).
-// Append is not supported - S3 objects are immutable and must be rewritten whole.
-//
-// Usage (register an IAmazonS3 in DI, then mount by bucket/prefix):
-//   .MountSingleton<S3Node>("/archive", o => o.UseS3Bucket("my-bucket"))
-//   .MountSingleton<S3Node>("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"))
+/// <summary>
+/// Mounts an Amazon S3 bucket (optionally rooted at a key prefix) as a VFS path.
+/// <para>
+/// The node wraps a caller-supplied <see cref="IAmazonS3"/> client. AWS SDK clients are thread-safe
+/// and intended to live for the lifetime of the application, so a single client shared
+/// across the app (registered as a singleton) is the recommended usage.
+/// </para>
+/// <para>
+/// Path mapping: the mount-relative VFS path becomes the S3 object key, optionally
+/// prefixed. S3 is a flat key space with '/' separators, so "folders" are virtual -
+/// <see cref="ListAsync"/> uses a '/' delimiter to surface them as directories.
+/// </para>
+/// <para>
+/// Native <see cref="CopyAsync"/> uses S3 CopyObject (server-side, no bytes through the client).
+/// Append is not supported - S3 objects are immutable and must be rewritten whole.
+/// </para>
+/// </summary>
+/// <example>
+/// Register an <see cref="IAmazonS3"/> in DI, then mount by bucket/prefix:
+/// <code>
+/// .MountSingleton&lt;S3Node&gt;("/archive", o => o.UseS3Bucket("my-bucket"))
+/// .MountSingleton&lt;S3Node&gt;("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"))
+/// </code>
+/// </example>
 public sealed class S3Node : VfsNodeBase, ICatalogMirror
 {
     private readonly IAmazonS3      _s3;
@@ -32,6 +40,13 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
     private readonly string         _prefix;   // normalized: no leading/trailing '/', "" when none
     private readonly CatalogMirror? _mirror;   // namespace cache; null = no caching
 
+    /// <summary>Creates a node over the given S3 <paramref name="client"/> and bucket, optionally rooted at a key prefix.</summary>
+    /// <param name="client">The S3 client to use. AWS SDK clients are thread-safe and intended to be shared as singletons.</param>
+    /// <param name="bucketName">The bucket to mount.</param>
+    /// <param name="keyPrefix">Optional key prefix the mount is rooted at; leading/trailing slashes are trimmed.</param>
+    /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="client"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="bucketName"/> is null or whitespace.</exception>
     public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, CatalogMirror? mirror = null)
     {
         _s3     = client ?? throw new ArgumentNullException(nameof(client));
@@ -42,7 +57,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         _mirror = mirror;
     }
 
-    // Activated by MountSingleton<S3Node> from the configured options + DI client.
+    /// <summary>Activated by <c>MountSingleton&lt;S3Node&gt;</c> from the configured options + DI client.</summary>
     public S3Node(VfsMountOptions options, IAmazonS3 client, IServiceProvider services)
         : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix,
                ResolveMirror(options, services)) { }
@@ -55,6 +70,8 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
+    /// <summary>Opens the S3 object for reading, or returns <c>null</c> if it does not exist.</summary>
+    /// <returns>A readable stream over the object's contents, or <c>null</c> when the object is not found.</returns>
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         try
@@ -71,6 +88,13 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         }
     }
 
+    /// <summary>Opens a write stream that stages bytes locally and uploads the object to S3 on close.</summary>
+    /// <param name="request">The write request identifying the target object.</param>
+    /// <param name="mode">The write mode; <see cref="VfsWriteMode.Append"/> is not supported.</param>
+    /// <param name="ct">A token to cancel the operation.</param>
+    /// <returns>A writable stream that commits the object to S3 when disposed.</returns>
+    /// <exception cref="NotSupportedException"><paramref name="mode"/> is <see cref="VfsWriteMode.Append"/> - S3 objects are immutable.</exception>
+    /// <exception cref="IOException"><paramref name="mode"/> is <see cref="VfsWriteMode.CreateNew"/> and the object already exists.</exception>
     public override async Task<Stream> OpenWriteAsync(
         VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
@@ -94,14 +118,17 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         return new S3CommitStream(_s3, _bucket, key, onCommitted);
     }
 
+    /// <summary>Deletes the S3 object and removes it from the mirror.</summary>
     public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await _s3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
         if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
     }
 
-    // Native server-side copy. Base MoveAsync/RenameAsync reuse this (copy + delete), so the mirror
-    // tracks moves too (dst upserted here, src removed by DeleteAsync).
+    /// <summary>
+    /// Native server-side copy. Base <c>MoveAsync</c>/<c>RenameAsync</c> reuse this (copy + delete), so the mirror
+    /// tracks moves too (dst upserted here, src removed by <see cref="DeleteAsync"/>).
+    /// </summary>
     public override async Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         await _s3.CopyObjectAsync(new CopyObjectRequest
@@ -112,13 +139,17 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         if (_mirror is not null && await GetInfoAsync(dst, ct) is { } info) await _mirror.UpsertAsync(info, ct);
     }
 
-    // S3 keys are case-sensitive, and a non-prefix pattern (e.g. "*.pdf") cannot be pushed down -
-    // it forces a full bucket scan (unless a mirror serves the listing locally).
+    /// <summary>S3 keys are case-sensitive.</summary>
     protected override bool IsCaseSensitive => true;
+
+    /// <summary>
+    /// A non-prefix pattern (e.g. <c>"*.pdf"</c>) cannot be pushed down - it forces a full bucket
+    /// scan (unless a mirror serves the listing locally).
+    /// </summary>
     protected override bool RequiresFullScan(VfsListOptions options)
         => _mirror is null && !IsPurePrefixPattern(options.SearchPattern);
 
-    // With a mirror: seed once, then serve every listing (incl. recursive) from the local catalog.
+    /// <summary>With a mirror: seed once, then serve every listing (incl. recursive) from the local catalog.</summary>
     public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -127,6 +158,10 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
             yield return info;
     }
 
+    /// <summary>
+    /// Lists the immediate children of a directory: from the mirror when present, otherwise a single-level
+    /// <c>ListObjectsV2</c> with a '/' delimiter that surfaces common prefixes as directories and keys as files.
+    /// </summary>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -175,6 +210,10 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         while (token is not null);
     }
 
+    /// <summary>
+    /// Returns metadata for the object at the path, a directory entry when child keys exist under it,
+    /// or <c>null</c> when nothing matches. The mount root is always reported as a directory.
+    /// </summary>
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         var rel = Rel(request);
@@ -217,7 +256,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
 
     // -- Catalog mirror (ICatalogMirror) ---------------------------------------
 
-    // Force a re-sync of the mirror against the bucket (picks up changes made outside this VFS).
+    /// <summary>Force a re-sync of the mirror against the bucket (picks up changes made outside this VFS).</summary>
     public Task RefreshAsync(CancellationToken ct = default) => ResyncAsync(ct);
 
     private async Task EnsureSeededAsync(CancellationToken ct)

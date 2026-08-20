@@ -4,20 +4,25 @@ using System.Text.Json.Serialization;
 
 namespace Dytools.VirtualFileSystem.Catalog;
 
-// Durable IVfsCatalog that persists the whole namespace as a single JSON document in a
-// backing store (any IVfsNode) - so a dedupe mount works with no external database. Loads
-// once, keeps the namespace in memory, and rewrites the document on every change
-// (atomically: write a temp file, then rename over the target).
-//
-// Register it to use it; there is no implicit default. Give it a store at registration:
-//   services.AddVfsJsonCatalog(sp => sp.NodeAt("/disk/catalog"));
-//
-// Great for getting started and small/medium namespaces. Each save is O(entries); for
-// high write volume implement IVfsCatalog over a database instead.
-//
-// Partition-capable: ForPartition(key) returns a catalog backed by a separate file in the
-// same store, so one registration can serve several mounts with isolated namespaces and
-// reference counts.
+/// <summary>
+/// Durable <see cref="IVfsCatalog"/> that persists the whole namespace as a single JSON document in a
+/// backing store (any <see cref="IVfsNode"/>) - so a dedupe mount works with no external database. Loads
+/// once, keeps the namespace in memory, and rewrites the document on every change
+/// (atomically: write a temp file, then rename over the target).
+/// </summary>
+/// <remarks>
+/// Register it to use it; there is no implicit default. Give it a store at registration:
+/// <code>
+///   services.AddVfsJsonCatalog(sp =&gt; sp.NodeAt("/disk/catalog"));
+/// </code>
+/// Great for getting started and small/medium namespaces. Each save is O(entries); for
+/// high write volume implement <see cref="IVfsCatalog"/> over a database instead.
+/// <para>
+/// Partition-capable: <see cref="ForPartition"/> returns a catalog backed by a separate file in the
+/// same store, so one registration can serve several mounts with isolated namespaces and
+/// reference counts.
+/// </para>
+/// </remarks>
 public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -37,17 +42,20 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Dictionary<string, CatalogEntry>? _entries;   // keyed by canonical path string; null until loaded
 
+    /// <summary>Creates a catalog that persists to <paramref name="path"/> within the given <paramref name="store"/>.</summary>
     public JsonFileVfsCatalog(IVfsNode store, string path = ".vfs-catalog.json")
     {
         _store = store;
         _path  = path;
     }
 
+    /// <summary>Returns a catalog backed by a separate file in the same store, isolated to <paramref name="partitionKey"/>.</summary>
     public IVfsCatalog ForPartition(string partitionKey)
         => new JsonFileVfsCatalog(_store, PartitionFile(_path, partitionKey));
 
     // -- Reads -----------------------------------------------------------------
 
+    /// <inheritdoc />
     public async ValueTask<CatalogEntry?> GetAsync(VfsPath path, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -55,6 +63,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         finally { _gate.Release(); }
     }
 
+    /// <inheritdoc />
     public async IAsyncEnumerable<CatalogEntry> ListChildrenAsync(
         VfsPath path, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -72,6 +81,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         foreach (var c in children) { ct.ThrowIfCancellationRequested(); yield return c; }
     }
 
+    /// <inheritdoc />
     public async ValueTask<int> ReferenceCountAsync(string contentId, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -79,6 +89,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         finally { _gate.Release(); }
     }
 
+    /// <inheritdoc />
     public async ValueTask<string?> FindContentIdByHashAsync(string hash, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -94,6 +105,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
 
     // -- Mutations -------------------------------------------------------------
 
+    /// <inheritdoc />
     public async ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry entry, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -101,9 +113,11 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         finally { _gate.Release(); }
     }
 
-    // Apply many entries (files and/or directories) with the document persisted ONCE at the end - the
-    // fast path for seeding a mirror. Overrides the interface default (which loops PutEntryAsync, one
-    // save each).
+    /// <summary>
+    /// Apply many entries (files and/or directories) with the document persisted ONCE at the end - the
+    /// fast path for seeding a mirror. Overrides the interface default (which loops <see cref="PutEntryAsync"/>, one
+    /// save each).
+    /// </summary>
     public async ValueTask PutEntriesAsync(IEnumerable<CatalogEntry> entries, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -131,6 +145,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         return prev;
     }
 
+    /// <inheritdoc />
     public async ValueTask EnsureDirectoryAsync(VfsPath path, DateTimeOffset timestamp, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -138,6 +153,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         finally { _gate.Release(); }
     }
 
+    /// <inheritdoc />
     public async IAsyncEnumerable<CatalogEntry> RemoveAsync(
         VfsPath path, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -154,8 +170,10 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         foreach (var f in removedFiles) { ct.ThrowIfCancellationRequested(); yield return f; }
     }
 
-    // Remove many paths/subtrees, persisting once. Overrides the interface default (loop, save each).
-    // Removed file entries aren't returned - bulk callers that need GC use the single-item RemoveAsync.
+    /// <summary>
+    /// Remove many paths/subtrees, persisting once. Overrides the interface default (loop, save each).
+    /// Removed file entries aren't returned - bulk callers that need GC use the single-item <see cref="RemoveAsync(VfsPath, CancellationToken)"/>.
+    /// </summary>
     public async ValueTask RemoveAsync(IEnumerable<VfsPath> paths, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -192,6 +210,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         return removedFiles;
     }
 
+    /// <inheritdoc />
     public async ValueTask MoveAsync(VfsPath fromPath, VfsPath toPath, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -224,6 +243,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         finally { _gate.Release(); }
     }
 
+    /// <inheritdoc />
     public async ValueTask TouchAccessedAsync(VfsPath path, DateTimeOffset accessedAt, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);

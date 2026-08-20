@@ -409,6 +409,11 @@ public readonly struct VfsPath : IEquatable<VfsPath>
     // Un-normalised dot segments in either operand are resolved lazily via a
     // stackalloc normalisation pass - no heap allocation even for messy paths.
 
+    /// <summary>
+    /// Compares two paths for equality over path + stream, ignoring the query string.
+    /// Uses the 36-bit partial hash for a fast inequality short-circuit, then a
+    /// dot-segment-aware span comparison (stackalloc, no heap allocation).
+    /// </summary>
     public bool Equals(VfsPath other)
     {
         // Fast inequality: hash mismatch → definitely not equal (zero false negatives).
@@ -419,6 +424,7 @@ public readonly struct VfsPath : IEquatable<VfsPath>
         return EqualsNormalized(PathSpan, StreamSpan, other.PathSpan, other.StreamSpan, comp);
     }
 
+    /// <summary>True when <paramref name="obj"/> is a <see cref="VfsPath"/> equal to this one.</summary>
     public override bool Equals(object? obj) => obj is VfsPath other && Equals(other);
 
     /// <summary>
@@ -437,7 +443,9 @@ public readonly struct VfsPath : IEquatable<VfsPath>
             comp);
     }
 
+    /// <summary>True when <paramref name="left"/> and <paramref name="right"/> are equal (path + stream, query ignored).</summary>
     public static bool operator ==(VfsPath left, VfsPath right) => left.Equals(right);
+    /// <summary>True when <paramref name="left"/> and <paramref name="right"/> are not equal (path + stream, query ignored).</summary>
     public static bool operator !=(VfsPath left, VfsPath right) => !left.Equals(right);
 
     // Span-level equality that handles un-normalised dot segments without heap allocs.

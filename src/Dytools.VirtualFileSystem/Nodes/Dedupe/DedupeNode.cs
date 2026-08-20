@@ -5,25 +5,37 @@ using Dytools.VirtualFileSystem.Catalog;
 
 namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 
-// Content-addressable, copy-on-write dedup decorator over any inner node.
-//
-// Bytes are stored once per unique content (keyed by hash) in the inner node under
-// the blob prefix; an IVfsCatalog maps logical paths to those blobs and to metadata.
-// Copy/Move are catalog-only (no byte movement). Identical content collapses to one
-// blob; editing a path forks it to a new hash, leaving others untouched.
-//
-//   var store = new LocalFsNode("/data");
-//   new DedupeNode(store, new JsonFileVfsCatalog(store))   // durable, zero-dependency catalog
-//
-// The catalog is required - it is the durable source of truth for the namespace, so there
-// is deliberately no in-memory default. The inner node is a dedicated blob store; don't mix
-// plain files into it.
+/// <summary>
+/// Content-addressable, copy-on-write dedup decorator over any inner node.
+/// <para>
+/// Bytes are stored once per unique content (keyed by hash) in the inner node under
+/// the blob prefix; an <see cref="IVfsCatalog"/> maps logical paths to those blobs and to metadata.
+/// Copy/Move are catalog-only (no byte movement). Identical content collapses to one
+/// blob; editing a path forks it to a new hash, leaving others untouched.
+/// </para>
+/// <para>
+/// The catalog is required - it is the durable source of truth for the namespace, so there
+/// is deliberately no in-memory default. The inner node is a dedicated blob store; don't mix
+/// plain files into it.
+/// </para>
+/// </summary>
+/// <remarks>
+/// <code>
+///   var store = new LocalFsNode("/data");
+///   new DedupeNode(store, new JsonFileVfsCatalog(store))   // durable, zero-dependency catalog
+/// </code>
+/// </remarks>
 public sealed class DedupeNode : VfsNodeBase
 {
     private readonly IVfsNode      _inner;
     private readonly IVfsCatalog   _catalog;
     private readonly DedupeOptions _options;
 
+    /// <summary>Creates a dedup node over an <paramref name="inner"/> blob store and a required <paramref name="catalog"/>.</summary>
+    /// <param name="inner">The backing node used as a dedicated blob store.</param>
+    /// <param name="catalog">The durable source of truth mapping logical paths to blobs and metadata.</param>
+    /// <param name="options">Hashing and blob-layout options; defaults are used when <c>null</c>.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="catalog"/> is <c>null</c>.</exception>
     public DedupeNode(IVfsNode inner, IVfsCatalog catalog, DedupeOptions? options = null)
     {
         _inner   = inner;
@@ -31,9 +43,11 @@ public sealed class DedupeNode : VfsNodeBase
         _options = options ?? new DedupeOptions();
     }
 
-    // Activated by MountSingleton<DedupeNode>. Resolves the backing store
-    // (UseSource, via NodeAt), the catalog (default, or selected with UseDedupeCatalog), and the
-    // algorithm options - all from the configured mount options.
+    /// <summary>
+    /// Creates a dedup node from mount options. Activated by <c>MountSingleton&lt;DedupeNode&gt;</c>. Resolves the
+    /// backing store (<c>UseSource</c>, via <c>NodeAt</c>), the catalog (default, or selected with
+    /// <c>UseDedupeCatalog</c>), and the algorithm options - all from the configured mount options.
+    /// </summary>
     public DedupeNode(VfsMountOptions options, IServiceProvider services)
         : this(ResolveInner(options, services), ResolveCatalog(options, services), ResolveAlgorithm(options)) { }
 
@@ -68,6 +82,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Read ------------------------------------------------------------------
 
+    /// <inheritdoc/>
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
         var entry = await _catalog.GetAsync(req.Path, ct);
@@ -78,6 +93,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Write -----------------------------------------------------------------
 
+    /// <inheritdoc/>
     public override async Task<Stream> OpenWriteAsync(
         VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
     {
@@ -171,6 +187,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Delete ----------------------------------------------------------------
 
+    /// <inheritdoc/>
     public override async Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
         await foreach (var removed in _catalog.RemoveAsync(req.Path, ct))
@@ -182,6 +199,7 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Copy / Move (catalog-only) --------------------------------------------
 
+    /// <inheritdoc/>
     public override async Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         var from  = src.Path;
@@ -194,6 +212,7 @@ public sealed class DedupeNode : VfsNodeBase
         await _catalog.PutEntryAsync(entry with { Path = to, CreatedAt = now, ModifiedAt = now }, ct);
     }
 
+    /// <inheritdoc/>
     public override Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
         => _catalog.MoveAsync(src.Path, dst.Path, ct).AsTask();
 
@@ -210,12 +229,14 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Metadata / listing ----------------------------------------------------
 
+    /// <inheritdoc/>
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
         var entry = await _catalog.GetAsync(req.Path, ct);
         return entry is null ? null : ToNodeInfo(req.Path, entry);
     }
 
+    /// <inheritdoc/>
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -223,7 +244,12 @@ public sealed class DedupeNode : VfsNodeBase
             yield return ToNodeInfo(child.Path, child);
     }
 
-    // Exposes the catalog so consumers can inspect it: vfs.GetCapability<IVfsCatalog>(path).
+    /// <summary>
+    /// Exposes the catalog so consumers can inspect it: <c>vfs.GetCapability&lt;IVfsCatalog&gt;(path)</c>.
+    /// Otherwise defers to the base capability lookup.
+    /// </summary>
+    /// <typeparam name="T">The capability interface requested.</typeparam>
+    /// <returns>The catalog when assignable to <typeparamref name="T"/>, otherwise the base lookup result, or <c>null</c>.</returns>
     public override T? GetCapability<T>() where T : class => _catalog as T ?? base.GetCapability<T>();
 
     // -- Internals -------------------------------------------------------------
