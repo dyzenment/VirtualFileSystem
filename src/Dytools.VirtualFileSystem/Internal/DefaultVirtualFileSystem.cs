@@ -128,33 +128,6 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         }
     }
 
-    // -- Typed sugar -----------------------------------------------------------
-
-    public Task SendAsync<T>(string path, T value, CancellationToken ct = default)
-        => SendCoreAsync(path, value, null, ct);
-
-    public Task SendAsync<T>(string path, T value, JsonSerializerOptions jsonOptions, CancellationToken ct = default)
-        => SendCoreAsync(path, value, jsonOptions, ct);
-
-    private async Task SendCoreAsync<T>(string path, T value, JsonSerializerOptions? jsonOptions, CancellationToken ct)
-    {
-        await using var stream = await OpenWriteAsync(path, VfsWriteOptions.Default, ct);
-        await JsonSerializer.SerializeAsync(stream, value, jsonOptions, ct);
-    }
-
-    public Task<T?> RetrieveAsync<T>(string path, CancellationToken ct = default)
-        => RetrieveCoreAsync<T>(path, null, ct);
-
-    public Task<T?> RetrieveAsync<T>(string path, JsonSerializerOptions jsonOptions, CancellationToken ct = default)
-        => RetrieveCoreAsync<T>(path, jsonOptions, ct);
-
-    private async Task<T?> RetrieveCoreAsync<T>(string path, JsonSerializerOptions? jsonOptions, CancellationToken ct)
-    {
-        await using var stream = await OpenReadAsync(path, ct);
-        if (stream is null) return default;
-        return await JsonSerializer.DeserializeAsync<T>(stream, jsonOptions, ct);
-    }
-
     // -- Consumer capability query ---------------------------------------------
 
     public T? GetCapability<T>(string path) where T : class

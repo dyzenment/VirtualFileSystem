@@ -34,7 +34,7 @@ internal sealed class NullNode : VfsNodeBase
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
         => Task.FromResult<Stream?>(new MemoryStream(_payload, writable: false));
 
-    public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+    public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? mode = null, CancellationToken ct = default)
         => _writeTask;
 
     public override Task<bool> ExistsAsync(VfsNodeRequest req, CancellationToken ct = default)

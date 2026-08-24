@@ -70,10 +70,18 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     // Applies the caller's requested timestamps once the handle is closed. Setting them while the
     // stream is still open would be undone by the final flush, so it has to happen after the base
     // dispose. Subclassing FileStream rather than wrapping it keeps every Stream member native.
-    private sealed class TimestampedFileStream(string path, FileMode mode, VfsWriteOptions options)
-        : FileStream(path, mode, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true)
+    private sealed class TimestampedFileStream : FileStream
     {
-        private bool _stamped;
+        private readonly string          _path;
+        private readonly VfsWriteOptions _options;
+        private          bool            _stamped;
+
+        public TimestampedFileStream(string path, FileMode mode, VfsWriteOptions options)
+            : base(path, mode, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true)
+        {
+            _path    = path;
+            _options = options;
+        }
 
         protected override void Dispose(bool disposing)
         {
@@ -93,12 +101,12 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
             _stamped = true;
             try
             {
-                if (options.ModifiedAt is { } modified)
-                    File.SetLastWriteTimeUtc(path, modified.UtcDateTime);
+                if (_options.ModifiedAt is { } modified)
+                    File.SetLastWriteTimeUtc(_path, modified.UtcDateTime);
 
                 // Linux has no settable birth time and the runtime throws rather than ignoring it.
-                if (options.CreatedAt is { } created && !OperatingSystem.IsLinux())
-                    File.SetCreationTimeUtc(path, created.UtcDateTime);
+                if (_options.CreatedAt is { } created && !OperatingSystem.IsLinux())
+                    File.SetCreationTimeUtc(_path, created.UtcDateTime);
             }
             catch (Exception ex) when (ex is IOException
                                           or UnauthorizedAccessException

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using Azure;
@@ -134,13 +135,37 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         if (container is null || name.Length == 0)
             throw new IOException("Cannot write to a container or the mount root - specify a blob path.");
 
-        var inner = await OpenInnerWriteAsync(container, name, mode, ct);
+        var inner = await OpenInnerWriteAsync(container, name, options, ct);
         return WrapWrite(inner, request.Path);
     }
 
-    private async Task<Stream> OpenInnerWriteAsync(
-        BlobContainerClient container, string name, VfsWriteMode mode, CancellationToken ct)
+    // Azure's Last-Modified is service-controlled, so a requested timestamp is carried in custom
+    // blob metadata instead and preferred over the service value when reading back. Set on the
+    // upload itself - there is no cheaper moment, and no separate call is needed.
+    private static Dictionary<string, string>? TimestampMetadata(VfsWriteOptions options)
     {
+        if (options.ModifiedAt is null && options.CreatedAt is null) return null;
+
+        var meta = new Dictionary<string, string>();
+        if (options.ModifiedAt is { } m) meta[VfsPropertyKeys.RequestedModified] = m.UtcDateTime.ToString("O");
+        if (options.CreatedAt  is { } c) meta[VfsPropertyKeys.RequestedCreated]  = c.UtcDateTime.ToString("O");
+        return meta;
+    }
+
+    // Reads a timestamp written by TimestampMetadata, or null when absent or unparseable.
+    private static DateTimeOffset? MetadataTime(IDictionary<string, string>? metadata, string key)
+        => metadata is not null
+           && metadata.TryGetValue(key, out var raw)
+           && DateTimeOffset.TryParse(raw, null, DateTimeStyles.RoundtripKind, out var value)
+            ? value
+            : null;
+
+    private async Task<Stream> OpenInnerWriteAsync(
+        BlobContainerClient container, string name, VfsWriteOptions options, CancellationToken ct)
+    {
+        var mode     = options.Mode;
+        var metadata = TimestampMetadata(options);
+
         if (mode == VfsWriteMode.Append)
         {
             // Azure blobs have a fixed type, and a block blob cannot be appended to in
@@ -160,20 +185,21 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
             {
                 // No existing blob - a fresh append that starts from empty.
             }
-            return new BlobRewriteStream(staging, target);
+            return new BlobRewriteStream(staging, target, metadata);
         }
 
         var block = container.GetBlockBlobClient(name);
 
         if (mode == VfsWriteMode.CreateNew)
         {
-            var options = new BlockBlobOpenWriteOptions
+            var createOptions = new BlockBlobOpenWriteOptions
             {
                 OpenConditions = new BlobRequestConditions { IfNoneMatch = ETag.All },
+                Metadata       = metadata,
             };
             try
             {
-                return await block.OpenWriteAsync(overwrite: true, options, ct);
+                return await block.OpenWriteAsync(overwrite: true, createOptions, ct);
             }
             catch (RequestFailedException ex) when (ex.Status is 409 or 412)
             {
@@ -181,7 +207,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
             }
         }
 
-        return await block.OpenWriteAsync(overwrite: true, cancellationToken: ct);
+        return await block.OpenWriteAsync(
+            overwrite: true,
+            options: metadata is null ? null : new BlockBlobOpenWriteOptions { Metadata = metadata },
+            cancellationToken: ct);
     }
 
     /// <summary>Deletes the blob (including snapshots) and removes it from the mirror. No-op when the path is not a blob.</summary>
@@ -256,7 +285,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         var containerSegment = AccountWide ? FirstSegment(rel) : "";
 
         await foreach (var item in container.GetBlobsByHierarchyAsync(
-                           BlobTraits.None, BlobStates.None, delimiter: "/", prefix: listPrefix, cancellationToken: ct))
+                           BlobTraits.Metadata, BlobStates.None, delimiter: "/", prefix: listPrefix, cancellationToken: ct))
         {
             if (item.IsPrefix)
             {
@@ -276,8 +305,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
                     IsFile       = true,
                     IsDirectory  = false,
                     SizeBytes    = b.Properties.ContentLength,
-                    ModifiedAt   = b.Properties.LastModified,
-                    CreatedAt    = b.Properties.CreatedOn,
+                    ModifiedAt   = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedModified)
+                                   ?? b.Properties.LastModified,
+                    CreatedAt    = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedCreated)
+                                   ?? b.Properties.CreatedOn,
                     Properties   = BuildProps(b.Properties.ETag?.ToString(), b.Properties.ContentType),
                 };
             }
@@ -313,8 +344,8 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
                 IsFile       = true,
                 IsDirectory  = false,
                 SizeBytes    = p.ContentLength,
-                ModifiedAt   = p.LastModified,
-                CreatedAt    = p.CreatedOn,
+                ModifiedAt   = MetadataTime(p.Metadata, VfsPropertyKeys.RequestedModified) ?? p.LastModified,
+                CreatedAt    = MetadataTime(p.Metadata, VfsPropertyKeys.RequestedCreated)  ?? p.CreatedOn,
                 Properties   = BuildProps(p.ETag.ToString(), p.ContentType),
             };
         }
@@ -387,7 +418,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
                     await foreach (var c in svc.GetBlobContainersAsync(cancellationToken: ct))
                     {
                         var cont = svc.GetBlobContainerClient(c.Name);
-                        await foreach (var b in cont.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: null, ct))
+                        await foreach (var b in cont.GetBlobsAsync(BlobTraits.Metadata, BlobStates.None, prefix: null, ct))
                         {
                             batch.Add(BlobInfo(Rebase(b.Name, c.Name), b));
                             if (batch.Count >= ResyncChunk && await FlushAsync()) return;   // overran → abort
@@ -397,7 +428,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
                 else
                 {
                     var scanPrefix = _prefix.Length == 0 ? null : _prefix + "/";
-                    await foreach (var b in _container!.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix: scanPrefix, ct))
+                    await foreach (var b in _container!.GetBlobsAsync(BlobTraits.Metadata, BlobStates.None, prefix: scanPrefix, ct))
                     {
                         var rel = Rebase(b.Name, "");
                         if (rel.Length == 0) continue;
@@ -428,8 +459,8 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         IsFile       = true,
         IsDirectory  = false,
         SizeBytes    = b.Properties.ContentLength,
-        ModifiedAt   = b.Properties.LastModified,
-        CreatedAt    = b.Properties.CreatedOn,
+        ModifiedAt   = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedModified) ?? b.Properties.LastModified,
+        CreatedAt    = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedCreated)  ?? b.Properties.CreatedOn,
         Properties   = BuildProps(b.Properties.ETag?.ToString(), b.Properties.ContentType),
     };
 
@@ -490,12 +521,14 @@ internal sealed class BlobRewriteStream : Stream
 {
     private readonly FileStream _temp;
     private readonly BlobClient _blob;
+    private readonly IDictionary<string, string>? _metadata;
     private          bool       _committed;
 
-    public BlobRewriteStream(FileStream temp, BlobClient blob)
+    public BlobRewriteStream(FileStream temp, BlobClient blob, IDictionary<string, string>? metadata = null)
     {
-        _temp = temp;   // positioned at the end of any seeded existing content
-        _blob = blob;
+        _temp     = temp;   // positioned at the end of any seeded existing content
+        _blob     = blob;
+        _metadata = metadata;
     }
 
     public override bool CanWrite => true;
@@ -536,7 +569,10 @@ internal sealed class BlobRewriteStream : Stream
         {
             await _temp.FlushAsync().ConfigureAwait(false);
             _temp.Position = 0;
-            await _blob.UploadAsync(_temp, overwrite: true).ConfigureAwait(false);
+            await _blob.UploadAsync(_temp, new BlobUploadOptions
+            {
+                Metadata = _metadata,
+            }).ConfigureAwait(false);
         }
         finally
         {

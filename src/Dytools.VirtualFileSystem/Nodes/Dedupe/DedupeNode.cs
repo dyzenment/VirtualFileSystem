@@ -121,13 +121,14 @@ public sealed class DedupeNode : VfsNodeBase
             }
         }
 
-        var createdAt = existing?.CreatedAt ?? DateTimeOffset.UtcNow;   // preserve creation time on overwrite
-        return new DedupeWriteStream(this, path, temp, createdAt);
+        var createdAt = options.CreatedAt ?? existing?.CreatedAt ?? DateTimeOffset.UtcNow;   // preserve creation time on overwrite
+        return new DedupeWriteStream(this, path, temp, createdAt, options.ModifiedAt);
     }
 
     // Called by DedupeWriteStream on close: hash the buffered content, store the blob
     // once, record the file in the catalog, and GC the previously-referenced blob.
-    internal async Task CommitWriteAsync(VfsPath path, FileStream temp, DateTimeOffset createdAt)
+    internal async Task CommitWriteAsync(
+        VfsPath path, FileStream temp, DateTimeOffset createdAt, DateTimeOffset? modifiedAt = null)
     {
         await temp.FlushAsync();
         var size = temp.Length;
@@ -150,7 +151,9 @@ public sealed class DedupeNode : VfsNodeBase
             }
         }
 
-        var now = DateTimeOffset.UtcNow;
+        // The timestamps live in the catalog, so a requested value is stored as-is - nothing to
+        // reconcile against a backend clock.
+        var now = modifiedAt ?? DateTimeOffset.UtcNow;
         var prev = await _catalog.PutEntryAsync(new CatalogEntry
         {
             Path        = path,

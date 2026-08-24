@@ -109,16 +109,20 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         if (mode == VfsWriteMode.CreateNew && await ObjectExistsAsync(key, ct))
             throw new IOException($"S3 object already exists: s3://{_bucket}/{key}");
 
-        // Write-through: on commit, record the object in the mirror.
-        var path = request.Path;
+        // Write-through: on commit, record the object in the mirror. The mirror has to record the
+        // timestamp the caller asked for, not the moment of the write, or a listing served from the
+        // mirror would contradict a GetInfo served from the object's metadata.
+        var path       = request.Path;
+        var modifiedAt = options.ModifiedAt;
         Func<long, Task>? onCommitted = _mirror is null
             ? null
             : size => _mirror.UpsertAsync(new VfsNodeInfo
             {
                 RelativePath = path, IsFile = true, IsDirectory = false,
-                SizeBytes = size, ModifiedAt = DateTimeOffset.UtcNow,
+                SizeBytes = size, ModifiedAt = modifiedAt ?? DateTimeOffset.UtcNow,
+                CreatedAt = options.CreatedAt,
             });
-        return new S3CommitStream(_s3, _bucket, key, onCommitted);
+        return new S3CommitStream(_s3, _bucket, key, onCommitted, S3Timestamps.ForWrite(options));
     }
 
     /// <summary>Deletes the S3 object and removes it from the mirror.</summary>
@@ -238,7 +242,9 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
                 IsFile       = true,
                 IsDirectory  = false,
                 SizeBytes    = meta.ContentLength,
-                ModifiedAt   = ToUtc(meta.LastModified),
+                ModifiedAt   = S3Timestamps.Read(meta.Metadata, VfsPropertyKeys.RequestedModified)
+                               ?? ToUtc(meta.LastModified),
+                CreatedAt    = S3Timestamps.Read(meta.Metadata, VfsPropertyKeys.RequestedCreated),
                 Properties   = props,
             };
         }
@@ -381,6 +387,32 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
 // Buffers written bytes to a temp file, then uploads to S3 once on dispose via
 // TransferUtility (which switches to multipart automatically for large payloads).
 // S3 has no streaming-append write, so we stage locally then upload atomically.
+// S3's LastModified is service-controlled, so a requested timestamp travels in custom object
+// metadata and is preferred over the service value when reading back.
+internal static class S3Timestamps
+{
+    public static Dictionary<string, string>? ForWrite(VfsWriteOptions options)
+    {
+        if (options.ModifiedAt is null && options.CreatedAt is null) return null;
+
+        var meta = new Dictionary<string, string>();
+        if (options.ModifiedAt is { } m) meta[VfsPropertyKeys.RequestedModified] = m.UtcDateTime.ToString("O");
+        if (options.CreatedAt  is { } c) meta[VfsPropertyKeys.RequestedCreated]  = c.UtcDateTime.ToString("O");
+        return meta;
+    }
+
+    // S3 lowercases metadata keys and hands them back with the x-amz-meta- prefix stripped by the
+    // SDK, so look the key up case-insensitively rather than assuming it round-trips verbatim.
+    public static DateTimeOffset? Read(Amazon.S3.Model.MetadataCollection? metadata, string key)
+    {
+        if (metadata is null) return null;
+        var raw = metadata[key] ?? metadata["x-amz-meta-" + key];
+        return DateTimeOffset.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var value)
+            ? value
+            : null;
+    }
+}
+
 internal sealed class S3CommitStream : Stream
 {
     private readonly IAmazonS3        _s3;
@@ -389,14 +421,18 @@ internal sealed class S3CommitStream : Stream
     private readonly string           _tempPath;
     private readonly FileStream       _temp;
     private readonly Func<long, Task>? _onCommitted;   // write-through the mirror (size in bytes)
+    private readonly IDictionary<string, string>? _metadata;
     private          bool             _committed;
 
-    public S3CommitStream(IAmazonS3 s3, string bucket, string key, Func<long, Task>? onCommitted = null)
+    public S3CommitStream(IAmazonS3 s3, string bucket, string key,
+                          Func<long, Task>? onCommitted = null,
+                          IDictionary<string, string>? metadata = null)
     {
         _s3          = s3;
         _bucket      = bucket;
         _key         = key;
         _onCommitted = onCommitted;
+        _metadata    = metadata;
         _tempPath    = Path.Combine(Path.GetTempPath(), "vfs-s3-" + Guid.NewGuid().ToString("N"));
         _temp        = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
                                       FileShare.None, bufferSize: 4096, useAsync: true);
@@ -441,7 +477,15 @@ internal sealed class S3CommitStream : Stream
             var size = _temp.Length;
             _temp.Position = 0;
             var transfer = new TransferUtility(_s3);
-            await transfer.UploadAsync(_temp, _bucket, _key).ConfigureAwait(false);
+            var upload   = new TransferUtilityUploadRequest
+            {
+                InputStream = _temp, BucketName = _bucket, Key = _key,
+            };
+            // Set on the upload itself: S3 object metadata is immutable, so applying it afterwards
+            // would mean a server-side copy of the whole object onto itself.
+            if (_metadata is not null)
+                foreach (var (k, v) in _metadata) upload.Metadata.Add(k, v);
+            await transfer.UploadAsync(upload).ConfigureAwait(false);
             if (_onCommitted is not null) await _onCommitted(size).ConfigureAwait(false);
         }
         finally

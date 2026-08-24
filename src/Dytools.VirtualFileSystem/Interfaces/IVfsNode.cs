@@ -9,7 +9,7 @@ public interface IVfsNode
     /// <summary>Opens a readable stream for the request, or null when the entry does not exist.</summary>
     Task<Stream?>    OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default);
 
-    /// <summary>Opens a writable stream for the request using the given <paramref name="mode"/>.</summary>
+    /// <summary>Opens a writable stream for the request using the given <see cref="VfsWriteOptions.Mode"/>.</summary>
     Task<Stream>     OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Deletes the entry addressed by the request.</summary>

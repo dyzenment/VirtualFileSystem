@@ -1,3 +1,5 @@
+using Dytools.VirtualFileSystem.Nodes.Dedupe;
+using Dytools.VirtualFileSystem.Nodes.InMemory;
 using Dytools.VirtualFileSystem.Nodes.LocalFs;
 
 namespace Dytools.VirtualFileSystem.Tests;
@@ -162,5 +164,85 @@ public sealed class WriteOptionsTests : IDisposable
     {
         public string? LastModified { get; set; }
         public int ItemCount { get; set; }
+    }
+}
+
+public sealed class DedupeWriteOptionsTests
+{
+    // Dedupe keeps timestamps as catalog fields rather than backend state, so a requested value is
+    // recorded exactly - no backend clock to reconcile against.
+
+    [Fact]
+    public async Task Dedupe_RecordsRequestedModifiedAt()
+    {
+        var (vfs, _) = DedupeFixture.Create();
+        var modified = new DateTimeOffset(2015, 7, 4, 11, 22, 33, TimeSpan.Zero);
+
+        await using (var s = await vfs.OpenWriteAsync(
+                         "/dedupe/report.txt", new VfsWriteOptions { ModifiedAt = modified }))
+        await using (var w = new StreamWriter(s, leaveOpen: true))
+            await w.WriteAsync("payload");
+
+        var info = await vfs.GetInfoAsync("/dedupe/report.txt");
+        Assert.Equal(modified, info!.ModifiedAt);
+    }
+
+    [Fact]
+    public async Task Dedupe_RecordsRequestedCreatedAt()
+    {
+        var (vfs, _) = DedupeFixture.Create();
+        var created  = new DateTimeOffset(2013, 3, 3, 3, 3, 3, TimeSpan.Zero);
+
+        await using (var s = await vfs.OpenWriteAsync(
+                         "/dedupe/made.txt", new VfsWriteOptions { CreatedAt = created }))
+        await using (var w = new StreamWriter(s, leaveOpen: true))
+            await w.WriteAsync("payload");
+
+        var info = await vfs.GetInfoAsync("/dedupe/made.txt");
+        Assert.Equal(created, info!.CreatedAt);
+    }
+
+    [Fact]
+    public async Task Dedupe_WithoutRequest_UsesItsOwnClock()
+    {
+        var (vfs, _) = DedupeFixture.Create();
+        var before   = DateTimeOffset.UtcNow.AddSeconds(-5);
+
+        await vfs.WriteStringAsync("/dedupe/plain.txt", "payload");
+
+        var info = await vfs.GetInfoAsync("/dedupe/plain.txt");
+        Assert.True(info!.ModifiedAt >= before);
+    }
+
+    [Fact]
+    public async Task Dedupe_TimestampIsPerPath_NotPerContent()
+    {
+        // Two paths sharing one deduplicated blob must still carry their own timestamps.
+        var (vfs, _) = DedupeFixture.Create();
+        var first    = new DateTimeOffset(2010, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var second   = new DateTimeOffset(2022, 12, 25, 0, 0, 0, TimeSpan.Zero);
+
+        await using (var a = await vfs.OpenWriteAsync("/dedupe/a.txt", new VfsWriteOptions { ModifiedAt = first }))
+        await using (var w = new StreamWriter(a, leaveOpen: true))
+            await w.WriteAsync("identical");
+
+        await using (var b = await vfs.OpenWriteAsync("/dedupe/b.txt", new VfsWriteOptions { ModifiedAt = second }))
+        await using (var w = new StreamWriter(b, leaveOpen: true))
+            await w.WriteAsync("identical");
+
+        Assert.Equal(first,  (await vfs.GetInfoAsync("/dedupe/a.txt"))!.ModifiedAt);
+        Assert.Equal(second, (await vfs.GetInfoAsync("/dedupe/b.txt"))!.ModifiedAt);
+    }
+}
+
+// A dedupe mount over an in-memory blob store, for asserting catalog-recorded timestamps.
+internal static class DedupeFixture
+{
+    public static (IVirtualFileSystem Vfs, InMemoryVfsCatalog Catalog) Create()
+    {
+        var catalog = new InMemoryVfsCatalog();
+        var node    = new DedupeNode(new InMemoryKvNode(), catalog);
+        var vfs     = VfsFactory.Build(b => b.Mount("/dedupe", node));
+        return (vfs, catalog);
     }
 }

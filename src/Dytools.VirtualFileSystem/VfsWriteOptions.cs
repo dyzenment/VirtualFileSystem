@@ -28,7 +28,14 @@ public sealed record VfsWriteOptions
     /// Last-modified time to stamp on the written entry, or null to let the backend set its own.
     /// <para>
     /// Honoured by: LocalFs (all platforms), SharePoint (<c>fileSystemInfo</c>), Azure and S3 (custom
-    /// object metadata). Ignored by in-memory and dedupe nodes, which have no timestamp to set.
+    /// object metadata, since their own Last-Modified is service-controlled), and catalog-backed
+    /// nodes such as dedupe, which store it as a field and so record it exactly. Ignored by
+    /// in-memory, which has no timestamp at all.
+    /// <para>
+    /// One caveat on S3: a listing cannot return object metadata, so a value set here shows up in
+    /// <c>GetInfoAsync</c> and in a mirrored listing, but a direct unmirrored listing reports the
+    /// service time.
+    /// </para>
     /// </para>
     /// </summary>
     public DateTimeOffset? ModifiedAt { get; init; }

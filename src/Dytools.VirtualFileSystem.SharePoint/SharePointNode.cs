@@ -185,7 +185,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     /// Opens a write stream that uploads the whole item on close. Append is not supported.
     /// </summary>
     /// <exception cref="NotSupportedException">
-    /// Thrown when <paramref name="mode"/> is <see cref="VfsWriteMode.Append"/>; SharePoint items
+    /// Thrown when <see cref="VfsWriteOptions.Mode"/> is <see cref="VfsWriteMode.Append"/>; SharePoint items
     /// cannot be appended to and must be rewritten whole.
     /// </exception>
     public override Task<Stream> OpenWriteAsync(

@@ -5,7 +5,8 @@ namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 // record in the catalog. Content-addressing needs the full content before the key is
 // known, so writes are always buffered.
 internal sealed class DedupeWriteStream(
-    DedupeNode node, VfsPath path, FileStream temp, DateTimeOffset createdAt) : Stream
+    DedupeNode node, VfsPath path, FileStream temp,
+    DateTimeOffset createdAt, DateTimeOffset? modifiedAt = null) : Stream
 {
     private bool _committed;
 
@@ -43,7 +44,7 @@ internal sealed class DedupeWriteStream(
         var tempPath = temp.Name;
         try
         {
-            await node.CommitWriteAsync(path, temp, createdAt).ConfigureAwait(false);
+            await node.CommitWriteAsync(path, temp, createdAt, modifiedAt).ConfigureAwait(false);
         }
         finally
         {

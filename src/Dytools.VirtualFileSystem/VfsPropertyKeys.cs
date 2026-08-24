@@ -61,6 +61,20 @@ public static class VfsPropertyKeys
     /// </remarks>
     public const string CachedReadStream = "vfs.node.cachedReadStream";
 
+    /// <summary>
+    /// Custom object metadata carrying a caller-requested last-modified time, written by object
+    /// stores whose native Last-Modified is service-controlled and cannot be set (Azure, S3).
+    /// Value: ISO 8601 round-trip ("O") of the UTC instant.
+    /// <para>
+    /// Named to satisfy the strictest backend: Azure requires metadata names to be valid C#
+    /// identifiers, so no hyphens.
+    /// </para>
+    /// </summary>
+    public const string RequestedModified = "vfs_modified";
+
+    /// <summary>As <see cref="RequestedModified"/>, for the creation time.</summary>
+    public const string RequestedCreated = "vfs_created";
+
     // Example node-specific keys for documentation purposes:
     // "ETag"         - HTTP entity tag (S3, REST nodes)
     // "ContentType"  - MIME type (S3, HTTP nodes)

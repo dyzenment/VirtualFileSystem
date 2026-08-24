@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace Dytools.VirtualFileSystem;
 
 /// <summary>
@@ -34,6 +32,21 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <c>OpenWriteAsync(path, VfsWriteMode.Append)</c> still binds; pass full
     /// <see cref="VfsWriteOptions"/> to also request timestamps on the written entry.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>You must dispose the returned stream, and the VFS will not do it for you.</b> For several
+    /// backends the write does not happen when you call Write - it happens on dispose. A SharePoint,
+    /// S3 or appending-Azure write stages your bytes to a local temp file and only uploads them when
+    /// the stream closes, so an undisposed stream means nothing is stored at all and the temp file
+    /// leaks. The same applies to anything <see cref="VfsWriteOptions"/> asked for: timestamps are
+    /// stamped after the final flush, and a catalog or mirror row is written at the same point.
+    /// </para>
+    /// <para>
+    /// Prefer <c>await using</c>. Where the stream is handed to something that buffers - a
+    /// <c>StreamWriter</c>, a serialiser - flush or dispose that first, since disposing the VFS stream
+    /// is what commits, and anything still sitting in a writer's buffer will not have reached it.
+    /// </para>
+    /// </remarks>
     Task<Stream>    OpenWriteAsync(string path, VfsWriteOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Copies the entry at <paramref name="src"/> to <paramref name="dst"/>.</summary>
@@ -70,28 +83,6 @@ public interface IVirtualFileSystem : IAsyncDisposable
 
     /// <summary>Enumerates entry metadata with options: recursion, search pattern, kind/hidden filtering, projection.</summary>
     IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(string path, VfsListOptions options, CancellationToken ct = default);
-
-    /// <summary>
-    /// Serialises <paramref name="value"/> and writes it to <paramref name="path"/>. Default: JSON serialised
-    /// over a stream. Nodes only ever see byte streams - no typed interface in core.
-    /// </summary>
-    Task    SendAsync<T>(string path, T value, CancellationToken ct = default);
-
-    /// <summary>
-    /// As <see cref="SendAsync{T}(string,T,CancellationToken)"/>, with control over serialisation -
-    /// naming policy, converters, indentation. Pass the same options to
-    /// <see cref="RetrieveAsync{T}(string,JsonSerializerOptions,CancellationToken)"/> when reading back.
-    /// </summary>
-    Task    SendAsync<T>(string path, T value, JsonSerializerOptions jsonOptions, CancellationToken ct = default);
-
-    /// <summary>Reads and deserialises the entry at <paramref name="path"/> into <typeparamref name="T"/>.</summary>
-    Task<T?> RetrieveAsync<T>(string path, CancellationToken ct = default);
-
-    /// <summary>
-    /// As <see cref="RetrieveAsync{T}(string,CancellationToken)"/>, with control over deserialisation.
-    /// Must match the options the value was written with.
-    /// </summary>
-    Task<T?> RetrieveAsync<T>(string path, JsonSerializerOptions jsonOptions, CancellationToken ct = default);
 
     /// <summary>
     /// Resolves <paramref name="path"/> to its node, then calls <c>node.GetCapability&lt;T&gt;()</c>.
