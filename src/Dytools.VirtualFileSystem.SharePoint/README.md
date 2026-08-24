@@ -145,12 +145,12 @@ or isolate several mounts within one shared catalog using
 
 ## Delta change feed
 
-`GetCapability<ISharePointChangeFeed>(path)` exposes Graph's `/delta` directly (the caching
+`GetNodeCapability<ISharePointChangeFeed>(path)` exposes Graph's `/delta` directly (the caching
 catalog uses this under the hood). You own the cursor: pass the one you saved, apply the changes,
 then persist the returned cursor.
 
 ```csharp
-var feed = vfs.GetCapability<ISharePointChangeFeed>("/team");
+var feed = vfs.GetNodeCapability<ISharePointChangeFeed>("/team");
 var batch = await feed!.GetChangesAsync(savedCursor);   // savedCursor == null on the first run
 
 foreach (var change in batch.Changes)
@@ -176,3 +176,29 @@ Persist(batch.Cursor);   // save AFTER applying, so a crash re-delivers rather t
   surfaces the error for you to retry.
 
 Licensed under the Apache License 2.0.
+
+## Timestamps
+
+`ModifiedAt` and `CreatedAt` come from the driveItem's `fileSystemInfo` facet - the file's own times,
+the direct analogue of a local file's mtime - falling back to the service-controlled values for items
+that never carried one. The service values stay reachable as `ServerModified` / `ServerCreated` in
+`Properties`; they move for reasons unrelated to the bytes, such as a column edit or a retention
+label.
+
+That is also the only pair that round-trips: a timestamp requested through
+`VfsWriteOptions.ModifiedAt` is written to `fileSystemInfo`. It rides free on a chunked upload, and
+costs one extra PATCH on a small one.
+
+## Content hashes
+
+Graph reports a QuickXorHash for every item, and the delta feed carries it into the caching catalog
+along with everything else - so with a catalog configured, hashes for a whole library come back in one
+query rather than a request per file:
+
+```csharp
+var hashing = vfs.GetEntryCapability<IContentHashing>("/team/report.pdf");
+var hash    = await hashing!.GetHashAsync(VfsHashAlgorithms.QuickXor, VfsHashBudget.Cached);
+```
+
+QuickXorHash is implemented in the core package, so a local file can produce the same value and be
+compared against a SharePoint item without downloading either.

@@ -55,7 +55,7 @@ made **through this VFS** are written through immediately (write/delete/copy/mov
 **outside** it aren't seen until you re-sync: call `RefreshAsync` on demand -
 
 ```csharp
-await vfs.GetCapability<ICatalogMirror>("/archive")!.RefreshAsync();
+await vfs.GetNodeCapability<IRefreshableCache>("/archive")!.RefreshAsync();
 ```
 
 Select a keyed or partitioned catalog with `UseS3CachingCatalog(partition: …, serviceKey: …)`. The
@@ -72,3 +72,31 @@ very large or write-heavy buckets use a database-backed `IVfsCatalog`.
 - Object metadata surfaces `ETag` and `ContentType` in `VfsNodeInfo.Properties`.
 
 Licensed under the Apache License 2.0.
+
+## Content hashes
+
+An S3 ETag is the object's MD5 only for a single-part upload; a multipart one carries a `-N` suffix
+and is a hash of part hashes, so it is refused rather than returned as if it were the content's.
+
+For a hash that is always meaningful, have S3 compute and store one at upload time:
+
+```csharp
+.MountSingleton<S3Node>("/archive", o => o
+    .UseS3Bucket("my-bucket")
+    .UseS3Checksums(S3ChecksumRequest.Sha256))
+
+// or per write, overriding the mount - including opting one write out
+await vfs.OpenWriteAsync("/archive/report.pdf",
+    new VfsWriteOptions { NodeOptions = new S3WriteOptions { Checksum = S3ChecksumRequest.Sha256 } });
+```
+
+S3 computes it server-side and keeps it with the object, so reading it back later is free and it
+stays valid for multipart uploads:
+
+```csharp
+var hashing = vfs.GetEntryCapability<IContentHashing>("/archive/report.pdf");
+var sha256  = await hashing!.GetHashAsync(VfsHashAlgorithms.Sha256);   // no download
+```
+
+`S3WriteOptions.Checksum` is three-state: `Inherit` takes the mount's default, `None` opts a single
+write out of a mount that checksums everything, and a named algorithm overrides it.

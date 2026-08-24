@@ -151,12 +151,20 @@ Everything is driven through the injected `IVirtualFileSystem`:
 
 | Category | Members |
 |---|---|
-| Streams | `OpenReadAsync`, `OpenWriteAsync` (`Create` / `CreateNew` / `Append`) |
+| Streams | `OpenReadAsync`, `OpenWriteAsync` - a bare `VfsWriteMode` or a full `VfsWriteOptions` |
 | File ops | `CopyAsync`, `MoveAsync`, `RenameAsync`, `DeleteAsync` |
-| Metadata | `ExistsAsync`, `GetInfoAsync`, `ListAsync`, `ListInfoAsync` |
-| Typed sugar | `SendAsync<T>`, `RetrieveAsync<T>` (JSON over the stream) |
+| Metadata | `ExistsAsync`, `GetInfoAsync`, `ListAsync`, `ListInfoAsync` - with `VfsMetadataOptions` to follow symlinks or not |
+| Extensions | `ReadAsStringAsync`, `WriteStringAsync`, `ReadAllBytesAsync`, `WriteAllBytesAsync`, `SendAsync<T>`, `RetrieveAsync<T>` |
 | Scoping | `ScopeTo(path)` - a sub-rooted view; `Mount` / `Unmount` (instance-scoped) |
-| Capabilities | `GetCapability<T>(path)` - opt-in extended behaviour a node may expose |
+| Capabilities | `GetEntryCapability<T>(path)` and `GetNodeCapability<T>(path)` - opt-in behaviour a node may expose |
+
+The convenience members are extension methods rather than interface members: none of them is
+something a node could do better than the layer above, so they stay out of the contract every
+implementation has to honour.
+
+> **Disposing a write stream is not optional.** For SharePoint, S3 and appending Azure writes the
+> upload happens *on dispose* - the bytes are staged locally until then. An undisposed stream stores
+> nothing and leaks a temp file. Prefer `await using`, and flush any `StreamWriter` wrapping it first.
 
 ## Listing and search
 
@@ -218,15 +226,44 @@ or use the built-ins: `.AddRewriter(...)` for path rewriting and `.UseSymlinks()
 for node-level symlink following (zero overhead for nodes that don't opt in).
 
 ### Capabilities
-Nodes can expose optional behaviour beyond the core contract - e.g. a dedupe node
-exposes its `IVfsCatalog`. Consumers discover it at a path with
-`vfs.GetCapability<T>(path)`, which returns `null` when the owning node doesn't
-implement it. The core never calls capability interfaces itself.
+Nodes can expose behaviour beyond the core contract, in two flavours.
+
+**Entry capabilities** (`IEntryCapability`) address one entry, so the node hands back an object
+already bound to it and the interface carries no path at all:
+
+```csharp
+var hashing = vfs.GetEntryCapability<IContentHashing>("/archive/report.pdf");
+var hash    = await hashing?.GetHashAsync(VfsHashAlgorithms.Sha256);
+```
+
+**Node capabilities** (`INodeCapability`) belong to the node - refreshing a cache, reading a change
+feed, acting on many entries at once. Any path under the mount will do:
+
+```csharp
+await vfs.GetNodeCapability<IRefreshableCache>("/archive")!.RefreshAsync();
+```
+
+Both return `null` when the node doesn't expose the interface. An interface opts in by inheriting one
+of the markers - or both, when it can do either. Capabilities go straight to the node: they do not run
+through the middleware pipeline, so nothing a middleware would enforce applies to them.
+
+### Content hashes
+`IContentHashing` reports a hash for an entry, with `VfsHashBudget` capping what the answer may cost:
+`Cached` (what the node already holds), `Fetch` (one metadata request - the default), `Compute` (read
+the content), `ComputeAndStore` (also write it back to the service, where the backend allows it).
+
+Values are lowercase hex, except QuickXor which keeps the base64 Graph reports. `NativeAlgorithms`
+lists what a node can answer for free; `ComputableAlgorithms` what it can produce by reading.
 
 ### Entry metadata
 `GetInfoAsync` / `ListInfoAsync` return a `VfsEntryInfo` - path, kind, size, timestamps,
-`IsHidden` - plus a `Properties` bag for backend-specific extras (`ETag`, `ContentType`,
-content id, …). `Properties` is `string → string?` so it round-trips through any store and
+`IsHidden`, `IsSymlink` / `SymlinkTarget` - plus a `Properties` bag for backend-specific extras
+(`ETag`, `ContentType`, content id, …).
+
+Symlinks follow the `stat` / `lstat` split. `GetInfoAsync` follows by default, so it describes the
+*target* and sets `FollowedSymlink`; pass `VfsMetadataOptions.NoFollow` to describe the link itself,
+which is the only way to see one whose target is missing. Listings never follow, and report
+`IsSymlink` on the entries themselves - filter with `VfsEntryKind.Symlinks`. `Properties` is `string → string?` so it round-trips through any store and
 maps 1:1 onto S3/Azure metadata; read typed values with the accessors in
 `VfsPropertyExtensions`:
 
@@ -351,7 +388,7 @@ Every write to `/files/...` is content-hashed and stored once under `/dev/store/
 mapping lives in the catalog. Reach the catalog through the capability system:
 
 ```csharp
-var catalog = vfs.GetCapability<IVfsCatalog>("/files");
+var catalog = vfs.GetNodeCapability<IContentAddressedCatalog>("/files");
 ```
 
 Tune the algorithm through the same options:
@@ -450,7 +487,7 @@ own credential system. Either way credentials stay in your DI configuration and 
 this library. All three support an optional **caching catalog** (each via its own
 `UseS3CachingCatalog` / `UseAzureCachingCatalog` / `UseSharePointCachingCatalog`) that
 mirrors the backend's structure into an `IVfsCatalog` for fast local listings, refreshable via
-the `ICatalogMirror` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
+the `IRefreshableCache` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
 delta, while S3/Azure seed once and write through. See each package's README for setup.
 
 ## Writing a custom node

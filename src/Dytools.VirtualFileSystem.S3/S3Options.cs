@@ -71,4 +71,20 @@ public static class S3MountOptionsExtensions
     public static VfsMountOptions UseS3CachingCatalog(
         this VfsMountOptions options, string? partition = null, object? serviceKey = null)
         => options.Set(new CatalogSelection { Partition = partition, ServiceKey = serviceKey });
+
+    /// <summary>
+    /// Has S3 compute and store a checksum for every object written to this mount.
+    /// <para>
+    /// The service computes it server-side and keeps it with the object, so reading it back later is
+    /// free - and unlike an ETag it stays meaningful for a multipart upload, where the ETag is a hash
+    /// of part hashes rather than of the content. A single write can override this with
+    /// <see cref="S3WriteOptions.Checksum"/>, including opting out.
+    /// </para>
+    /// </summary>
+    public static VfsMountOptions UseS3Checksums(
+        this VfsMountOptions options, S3ChecksumRequest algorithm = S3ChecksumRequest.Sha256)
+    {
+        Get(options).DefaultChecksum = algorithm;
+        return options;
+    }
 }

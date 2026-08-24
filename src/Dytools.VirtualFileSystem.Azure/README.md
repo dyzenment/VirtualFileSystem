@@ -59,7 +59,7 @@ By default the mirror is **seeded once** (one full listing), then served locally
 immediately; changes made **outside** it aren't seen until you re-sync:
 
 ```csharp
-await vfs.GetCapability<ICatalogMirror>("/team")!.RefreshAsync();
+await vfs.GetNodeCapability<IRefreshableCache>("/team")!.RefreshAsync();
 ```
 
 Select a keyed or partitioned catalog with `UseAzureCachingCatalog(partition: …, serviceKey: …)`, and use
@@ -76,3 +76,29 @@ Azure **Blob change feed** enabled keep the mirror fresh incrementally instead o
 - Blob metadata surfaces `ETag` and `ContentType` in `VfsNodeInfo.Properties`.
 
 Licensed under the Apache License 2.0.
+
+## Content hashes
+
+Azure never computes a content hash of its own - `Content-MD5` is only ever what an uploader supplied,
+so a blob written by anything else has none. Have every write through this mount record one:
+
+```csharp
+.MountSingleton<AzureBlobNode>("/team", o => o.UseAzureBlob("docs").UseAzureContentMd5())
+```
+
+The bytes are already streaming past on the way up, so hashing them adds no transfer - just one
+request afterwards to attach the header. Afterwards the hash is free to read:
+
+```csharp
+var hashing = vfs.GetEntryCapability<IContentHashing>("/team/report.pdf");
+var md5     = await hashing!.GetHashAsync(VfsHashAlgorithms.Md5);   // no download
+```
+
+MD5 is a checksum rather than a content identity: fine for telling two files apart, not for trusting
+that two are the same against someone constructing a collision.
+
+## Timestamps
+
+Azure's `Last-Modified` is service-controlled, so a timestamp requested through
+`VfsWriteOptions.ModifiedAt` is kept in custom blob metadata and preferred over the service value when
+reading back. Listings fetch metadata, so it is visible there too.
