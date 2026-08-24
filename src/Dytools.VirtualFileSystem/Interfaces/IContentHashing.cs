@@ -13,8 +13,13 @@ namespace Dytools.VirtualFileSystem;
 /// <para>
 /// The lists describe the node; whether this particular entry is cheap is a property of the entry. An
 /// S3 ETag is an md5 for a single-part upload and meaningless for a multipart one; a dedupe entry has
-/// its sha256 only once stored. That is what <c>withoutFetching</c> settles, per call - so ask for the
-/// hash rather than asking whether it is available and then asking for it.
+/// its sha256 only once stored. <see cref="VfsHashBudget"/> settles that per call - so ask for the hash
+/// with a ceiling on the cost, rather than asking whether it is available and then asking for it.
+/// </para>
+/// <para>
+/// Every value is lowercase hex, except QuickXor which keeps the base64 Graph reports. Two nodes
+/// answering in different encodings would never compare equal, so the encoding is part of the contract
+/// rather than each node's choice.
 /// </para>
 /// </summary>
 public interface IContentHashing : IEntryCapability
@@ -32,15 +37,13 @@ public interface IContentHashing : IEntryCapability
     /// </summary>
     IReadOnlyList<string> ComputableAlgorithms { get; }
 
-    /// <summary>This entry's hash under <paramref name="algorithm"/>, or null when unavailable.</summary>
+    /// <summary>
+    /// This entry's hash under <paramref name="algorithm"/>, or null when it cannot be had within
+    /// <paramref name="budget"/>.
+    /// </summary>
     /// <param name="algorithm">A name from <see cref="VfsHashAlgorithms"/>.</param>
-    /// <param name="withoutFetching">
-    /// true to answer only from what the node already holds - returns null rather than doing anything
-    /// that costs. That covers reading the content, and equally a per-entry request to the backend: a
-    /// cached SharePoint node has the hash on its catalog row, and going to Graph for one that is
-    /// missing would be a round-trip per file, which is the cost this exists to avoid.
-    /// </param>
+    /// <param name="budget">The most this call may cost. See <see cref="VfsHashBudget"/>.</param>
     /// <param name="ct">A token to cancel the work.</param>
     Task<string?> GetHashAsync(
-        string algorithm, bool withoutFetching = false, CancellationToken ct = default);
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default);
 }

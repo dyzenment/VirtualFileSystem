@@ -11,6 +11,17 @@ public sealed class S3Options
 
     /// <summary>Optional key prefix the mount is rooted at.</summary>
     public string? Prefix { get; set; }
+
+    /// <summary>
+    /// Checksum algorithm S3 computes and stores for every write on this mount, or
+    /// <see cref="S3ChecksumRequest.None"/> to ask for none. A single write overrides it with
+    /// <see cref="S3WriteOptions.Checksum"/>.
+    /// <para>
+    /// Worth turning on where content gets compared: the stored checksum is a real content hash the
+    /// service computes, and unlike an ETag it stays meaningful for multipart uploads.
+    /// </para>
+    /// </summary>
+    public S3ChecksumRequest DefaultChecksum { get; set; } = S3ChecksumRequest.None;
 }
 
 /// <summary>Extension methods for configuring an <see cref="S3Node"/> mount on <see cref="VfsMountOptions"/>.</summary>

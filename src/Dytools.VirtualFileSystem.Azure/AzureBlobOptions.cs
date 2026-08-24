@@ -14,6 +14,12 @@ public sealed class AzureBlobOptions
 
     /// <summary>Optional path prefix the mount is rooted at (fixed-container mode).</summary>
     public string? Prefix    { get; set; }
+
+    /// <summary>
+    /// Whether every write computes an MD5 of the content and records it as the blob's Content-MD5.
+    /// See <c>UseAzureContentMd5</c>.
+    /// </summary>
+    public bool ContentMd5OnUpload { get; set; }
 }
 
 /// <summary>Extension methods for configuring an <see cref="AzureBlobNode"/> mount on <see cref="VfsMountOptions"/>.</summary>
@@ -66,4 +72,24 @@ public static class AzureBlobMountOptionsExtensions
     public static VfsMountOptions UseAzureCachingCatalog(
         this VfsMountOptions options, string? partition = null, object? serviceKey = null)
         => options.Set(new CatalogSelection { Partition = partition, ServiceKey = serviceKey });
+
+    /// <summary>
+    /// Computes an MD5 of every write on this mount and records it as the blob's Content-MD5.
+    /// <para>
+    /// Azure never computes a content hash itself - Content-MD5 is only ever what an uploader supplied,
+    /// which is why a blob written by anything else has none. Turning this on makes the hash free to
+    /// read back afterwards instead of costing a full download, and the bytes are already streaming
+    /// past on the way up, so computing it adds no transfer.
+    /// </para>
+    /// <para>
+    /// The cost is one extra request per write to attach the header once the content is committed, and
+    /// MD5 is a checksum rather than a content identity - fine for telling two files apart, not for
+    /// trusting that two are the same against an adversary.
+    /// </para>
+    /// </summary>
+    public static VfsMountOptions UseAzureContentMd5(this VfsMountOptions options, bool enabled = true)
+    {
+        Get(options).ContentMd5OnUpload = enabled;
+        return options;
+    }
 }

@@ -105,6 +105,7 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
     // reports Exists=true and GetInfo=null - "it is there but has no metadata", which nothing can act
     // on sensibly. POSIX draws the same line: `test -e` on a dangling link is false (it stats), while
     // `test -L` is true. VfsMetadataOptions.NoFollow is the `-L`.
+    /// <summary>Intercepts an exists check, following symlinks so it agrees with GetInfo.</summary>
     public async Task<bool> InvokeExistsAsync(
         VfsContext ctx,
         Func<VfsContext, CancellationToken, Task<bool>> next,

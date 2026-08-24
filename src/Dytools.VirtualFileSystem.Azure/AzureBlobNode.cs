@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Globalization;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
@@ -41,6 +42,7 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
     private readonly BlobContainerClient? _container;  // fixed-container mode
     private readonly string               _prefix;     // fixed mode only; normalized, no leading/trailing '/'
     private readonly NodeCatalog?       _mirror;     // namespace cache; null = no caching
+    private readonly bool               _contentMd5OnUpload;
 
     private bool AccountWide => _container is null;
 
@@ -74,6 +76,7 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
     public AzureBlobNode(VfsMountOptions options, BlobServiceClient service, IServiceProvider services)
     {
         var o = options.Require<AzureBlobOptions>();
+        _contentMd5OnUpload = o.ContentMd5OnUpload;
         if (string.IsNullOrWhiteSpace(o.Container))
         {
             _service = service ?? throw new ArgumentNullException(nameof(service));
@@ -122,7 +125,7 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
     /// </summary>
     /// <returns>A writable stream that commits the blob when disposed.</returns>
     /// <exception cref="IOException">
-    /// The path addresses a container or the mount root rather than a blob, or <paramref name="mode"/> is
+    /// The path addresses a container or the mount root rather than a blob, or the mode is
     /// <see cref="VfsWriteMode.CreateNew"/> and the blob already exists.
     /// </exception>
     public override async Task<Stream> OpenWriteAsync(
@@ -136,6 +139,13 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
             throw new IOException("Cannot write to a container or the mount root - specify a blob path.");
 
         var inner = await OpenInnerWriteAsync(container, name, options, ct);
+
+        // Azure computes no content hash of its own, so the only way a blob ever has one is if the
+        // uploader supplies it. The bytes are already going past here, so hashing them costs no extra
+        // transfer - just one request afterwards to attach the header.
+        if (_contentMd5OnUpload)
+            inner = new Md5StampingStream(inner, container.GetBlobClient(name));
+
         return WrapWrite(inner, request.Path);
     }
 
@@ -358,6 +368,97 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
 
             return null;
         }
+    }
+
+    // -- Content hashes --------------------------------------------------------
+
+    /// <summary>Hashing bound to the entry asked for.</summary>
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
+        => new AzureEntryHashing(this, relativePath) as T;
+
+    // Serves AzureEntryHashing. Content-MD5 is only present when it was supplied at upload - Azure
+    // does not compute one for you - so this is null far more often than the advertised list suggests.
+    internal async Task<string?> GetEntryHashAsync(
+        VfsPath path, string algorithm, VfsHashBudget budget, CancellationToken ct)
+    {
+        var key = VfsPropertyKeys.HashKey(algorithm);
+
+        if (_mirror is not null && await _mirror.GetAsync(path, ct) is { } row
+            && row.Properties?.TryGetValue(key, out var mirrored) == true
+            && !string.IsNullOrEmpty(mirrored))
+            return mirrored;
+
+        if (budget < VfsHashBudget.Fetch) return null;
+
+        var (container, name) = Locate(Rel(new VfsNodeRequest(path)));
+        if (container is null || name.Length == 0) return null;
+        var blob = container.GetBlobClient(name);
+
+        BlobProperties props;
+        try   { props = await blob.GetPropertiesAsync(cancellationToken: ct); }
+        catch (RequestFailedException ex) when (ex.Status == 404) { return null; }
+
+        // Content-MD5 is whatever the uploader supplied - Azure never computes one - so it is absent
+        // more often than the advertised list suggests.
+        if (VfsHashing.Matches(algorithm, VfsHashAlgorithms.Md5)
+            && props.ContentHash is { Length: > 0 } contentMd5)
+            return Convert.ToHexStringLower(contentMd5);
+
+        // A hash we stored earlier in blob metadata. Unlike a catalog row this outlives the content it
+        // describes: appending to an append blob, or writing a page blob, changes the bytes and leaves
+        // metadata untouched. Hence the size and mtime it was computed against.
+        if (ReadStoredHash(props.Metadata, key, props.ContentLength, props.LastModified) is { } stored)
+            return stored;
+
+        if (budget < VfsHashBudget.Compute) return null;
+
+        string? computed;
+        await using (var content = await OpenReadAsync(new VfsNodeRequest(path), ct))
+        {
+            if (content is null) return null;
+            computed = await VfsHashing.ComputeAsync(content, algorithm, ct);
+        }
+        if (computed is null) return null;
+
+        // Local cache first - our own, so no opt-in.
+        if (_mirror is not null) await _mirror.SetPropertyAsync(path, key, computed, ct);
+
+        // Writing it into the blob's own metadata is the part that mutates the service.
+        if (budget >= VfsHashBudget.ComputeAndStore)
+            await StoreHashAsync(blob, props, key, computed, ct);
+
+        return computed;
+    }
+
+    // Azure allows updating metadata in place, without rewriting the content.
+    private static async Task StoreHashAsync(
+        BlobClient blob, BlobProperties props, string key, string value, CancellationToken ct)
+    {
+        var metadata = new Dictionary<string, string>(props.Metadata)
+        {
+            [key.Replace('.', '_')] = StampHash(value, props.ContentLength, props.LastModified),
+        };
+        try   { await blob.SetMetadataAsync(metadata, cancellationToken: ct); }
+        catch (RequestFailedException) { /* best effort - the hash is still returned */ }
+    }
+
+    // "<hash>|<size>|<mtime ticks>" - compact, and unambiguous because a hash has no pipe in it.
+    private static string StampHash(string value, long size, DateTimeOffset modified)
+        => $"{value}|{size}|{modified.UtcTicks}";
+
+    private static string? ReadStoredHash(
+        IDictionary<string, string> metadata, string key, long size, DateTimeOffset modified)
+    {
+        if (metadata is null || !metadata.TryGetValue(key.Replace('.', '_'), out var raw)) return null;
+
+        var parts = raw.Split('|');
+        if (parts.Length != 3) return null;
+
+        // Refuse it the moment the content it described has moved on.
+        return long.TryParse(parts[1], out var storedSize) && storedSize == size
+            && long.TryParse(parts[2], out var storedTicks) && storedTicks == modified.UtcTicks
+                ? parts[0]
+                : null;
     }
 
     // -- Catalog mirror (IRefreshableCache) ---------------------------------------
@@ -621,5 +722,103 @@ internal sealed class MirrorCommitStream(Stream inner, Func<Task> onClose) : Str
         _closed = true;
         await inner.DisposeAsync().ConfigureAwait(false);   // commits the blob
         await onClose().ConfigureAwait(false);              // then record it in the mirror
+    }
+}
+
+/// <summary>
+/// An <see cref="AzureBlobNode"/>'s hashing bound to one entry.
+/// </summary>
+internal sealed class AzureEntryHashing(AzureBlobNode node, VfsPath path) : IContentHashing
+{
+    /// <summary>
+    /// MD5, from the blob's Content-MD5 header - but only when something set it at upload. Azure never
+    /// computes it, so a blob written elsewhere may well have none.
+    /// </summary>
+    public IReadOnlyList<string> NativeAlgorithms { get; } = [VfsHashAlgorithms.Md5];
+
+    /// <summary>
+    /// </summary>
+    /// <summary>
+    /// The standard algorithms, by downloading the blob. Advertised because the caller has to opt in
+    /// with <see cref="VfsHashBudget.Compute"/> - it is never reached by accident.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = VfsHashing.Computable;
+
+    /// <inheritdoc/>
+    public Task<string?> GetHashAsync(
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, budget, ct);
+}
+
+/// <summary>
+/// Passes writes through to the real blob stream while hashing them, then records the digest as the
+/// blob's Content-MD5 once the content is committed.
+/// </summary>
+internal sealed class Md5StampingStream(Stream inner, BlobClient blob) : Stream
+{
+    private readonly IncrementalHash _hash = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+    private bool _stamped;
+
+    public override bool CanWrite => true;
+    public override bool CanRead  => false;
+    public override bool CanSeek  => false;
+    public override long Length   => inner.Length;
+    public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
+
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        _hash.AppendData(buffer, offset, count);
+        inner.Write(buffer, offset, count);
+    }
+
+    public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+    {
+        _hash.AppendData(buffer, offset, count);
+        await inner.WriteAsync(buffer.AsMemory(offset, count), ct);
+    }
+
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+    {
+        _hash.AppendData(buffer.Span);
+        await inner.WriteAsync(buffer, ct);
+    }
+
+    public override void Flush() => inner.Flush();
+    public override int  Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin)       => throw new NotSupportedException();
+    public override void SetLength(long value)                      => throw new NotSupportedException();
+
+    public override async ValueTask DisposeAsync()
+    {
+        // The inner stream is what commits the blob, so the header can only be attached after it closes.
+        await inner.DisposeAsync().ConfigureAwait(false);
+        await StampAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            inner.Dispose();
+            StampAsync().GetAwaiter().GetResult();
+        }
+        base.Dispose(disposing);
+    }
+
+    private async Task StampAsync()
+    {
+        if (_stamped) return;
+        _stamped = true;
+        try
+        {
+            await blob.SetHttpHeadersAsync(new BlobHttpHeaders { ContentHash = _hash.GetHashAndReset() })
+                      .ConfigureAwait(false);
+        }
+        catch (RequestFailedException)
+        {
+            // Best effort - the content is written, which is what the caller was promised.
+        }
+        finally { _hash.Dispose(); }
     }
 }

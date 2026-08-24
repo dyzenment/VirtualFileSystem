@@ -38,6 +38,7 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
     private readonly IAmazonS3      _s3;
     private readonly string         _bucket;
     private readonly string         _prefix;   // normalized: no leading/trailing '/', "" when none
+    private readonly S3ChecksumRequest _defaultChecksum;
     private readonly NodeCatalog? _mirror;   // namespace cache; null = no caching
 
     /// <summary>Creates a node over the given S3 <paramref name="client"/> and bucket, optionally rooted at a key prefix.</summary>
@@ -47,8 +48,11 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
     /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
     /// <exception cref="ArgumentNullException"><paramref name="client"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException"><paramref name="bucketName"/> is null or whitespace.</exception>
-    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, NodeCatalog? mirror = null)
+    /// <param name="defaultChecksum">Checksum algorithm S3 computes and stores for every write on this mount.</param>
+    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, NodeCatalog? mirror = null,
+                  S3ChecksumRequest defaultChecksum = S3ChecksumRequest.None)
     {
+        _defaultChecksum = defaultChecksum;
         _s3     = client ?? throw new ArgumentNullException(nameof(client));
         _bucket = string.IsNullOrWhiteSpace(bucketName)
             ? throw new ArgumentException("Bucket name is required.", nameof(bucketName))
@@ -60,7 +64,8 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
     /// <summary>Activated by <c>MountSingleton&lt;S3Node&gt;</c> from the configured options + DI client.</summary>
     public S3Node(VfsMountOptions options, IAmazonS3 client, IServiceProvider services)
         : this(client, options.Require<S3Options>().Bucket, options.Require<S3Options>().Prefix,
-               ResolveMirror(options, services)) { }
+               ResolveMirror(options, services),
+               options.Require<S3Options>().DefaultChecksum) { }
 
     // Caching is opt-in: UseS3CachingCatalog stashes a CatalogSelection. Present = mirror the bucket
     // into the selected IVfsCatalog; absent = no caching.
@@ -90,11 +95,14 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
 
     /// <summary>Opens a write stream that stages bytes locally and uploads the object to S3 on close.</summary>
     /// <param name="request">The write request identifying the target object.</param>
-    /// <param name="mode">The write mode; <see cref="VfsWriteMode.Append"/> is not supported.</param>
+    /// <param name="options">
+    /// Write options. <see cref="VfsWriteMode.Append"/> is not supported; attach an
+    /// <see cref="S3WriteOptions"/> to override the mount's checksum setting for this write.
+    /// </param>
     /// <param name="ct">A token to cancel the operation.</param>
     /// <returns>A writable stream that commits the object to S3 when disposed.</returns>
-    /// <exception cref="NotSupportedException"><paramref name="mode"/> is <see cref="VfsWriteMode.Append"/> - S3 objects are immutable.</exception>
-    /// <exception cref="IOException"><paramref name="mode"/> is <see cref="VfsWriteMode.CreateNew"/> and the object already exists.</exception>
+    /// <exception cref="NotSupportedException">The mode is <see cref="VfsWriteMode.Append"/> - S3 objects are immutable.</exception>
+    /// <exception cref="IOException">The mode is <see cref="VfsWriteMode.CreateNew"/> and the object already exists.</exception>
     public override async Task<Stream> OpenWriteAsync(
         VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
@@ -122,7 +130,8 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
                 SizeBytes = size, ModifiedAt = modifiedAt ?? DateTimeOffset.UtcNow,
                 CreatedAt = options.CreatedAt,
             });
-        return new S3CommitStream(_s3, _bucket, key, onCommitted, S3Timestamps.ForWrite(options));
+        return new S3CommitStream(_s3, _bucket, key, onCommitted, S3Timestamps.ForWrite(options),
+                                  ChecksumFor(options));
     }
 
     /// <summary>Deletes the S3 object and removes it from the mirror.</summary>
@@ -263,6 +272,120 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
         }
     }
 
+    // Tag key/value limits are generous next to a hash - 128 and 256 characters against 64 for a
+    // sha256 hex - and tagging leaves content, ETag and version untouched. Best-effort: the hash has
+    // already been computed and is returned whether or not it could be persisted.
+    private async Task TagHashAsync(VfsPath path, string algorithm, string value, CancellationToken ct)
+    {
+        var key = KeyFor(Rel(new VfsNodeRequest(path)));
+        try
+        {
+            var existing = await _s3.GetObjectTaggingAsync(
+                new GetObjectTaggingRequest { BucketName = _bucket, Key = key }, ct);
+
+            var tagKey = VfsPropertyKeys.HashKey(algorithm).Replace('.', '-');
+            var tags   = existing.Tagging.Where(t => t.Key != tagKey).ToList();
+            tags.Add(new Tag { Key = tagKey, Value = value });
+
+            // S3 caps an object at ten tags; leave whatever is already there alone rather than evicting
+            // someone else's to make room for a cache entry.
+            if (tags.Count > 10) return;
+
+            await _s3.PutObjectTaggingAsync(new PutObjectTaggingRequest
+            {
+                BucketName = _bucket, Key = key, Tagging = new Tagging { TagSet = tags },
+            }, ct);
+        }
+        catch (AmazonS3Exception)
+        {
+            // Tagging may be denied by policy; the caller still gets the hash.
+        }
+    }
+
+    // A write says nothing (Inherit) and takes the mount's default, or names its own - including None
+    // to opt one write out of a mount that checksums everything.
+    private ChecksumAlgorithm? ChecksumFor(VfsWriteOptions options)
+    {
+        var requested = options.NodeOptions is S3WriteOptions { Checksum: not S3ChecksumRequest.Inherit } s3
+            ? s3.Checksum
+            : _defaultChecksum;
+
+        return requested switch
+        {
+            S3ChecksumRequest.Crc32  => ChecksumAlgorithm.CRC32,
+            S3ChecksumRequest.Crc32C => ChecksumAlgorithm.CRC32C,
+            S3ChecksumRequest.Sha1   => ChecksumAlgorithm.SHA1,
+            S3ChecksumRequest.Sha256 => ChecksumAlgorithm.SHA256,
+            _                        => null,
+        };
+    }
+
+    // -- Content hashes --------------------------------------------------------
+
+    /// <summary>Hashing bound to the entry asked for.</summary>
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
+        => new S3EntryHashing(this, relativePath) as T;
+
+    // Serves S3EntryHashing. An ETag is the object's md5 only for a single-part upload; multipart
+    // ETags carry a "-N" suffix and are a hash of part hashes, which would be a wrong answer rather
+    // than a missing one.
+    internal async Task<string?> GetEntryHashAsync(
+        VfsPath path, string algorithm, VfsHashBudget budget, CancellationToken ct)
+    {
+        var key = VfsPropertyKeys.HashKey(algorithm);
+
+        if (_mirror is not null && await _mirror.GetAsync(path, ct) is { } row
+            && row.Properties?.TryGetValue(key, out var mirrored) == true
+            && !string.IsNullOrEmpty(mirrored))
+            return mirrored;
+
+        if (budget < VfsHashBudget.Fetch) return null;
+
+        if (VfsHashing.Matches(algorithm, VfsHashAlgorithms.Md5))
+        {
+            try
+            {
+                var meta = await _s3.GetObjectMetadataAsync(
+                    new GetObjectMetadataRequest
+                    {
+                        BucketName = _bucket, Key = KeyFor(Rel(new VfsNodeRequest(path))),
+                    }, ct);
+
+                // An ETag is the object's md5 only for a single-part upload. A multipart one carries a
+                // "-N" suffix and is a hash of part hashes, so returning it would be a wrong answer
+                // rather than a missing one.
+                var etag = meta.ETag?.Trim('"');
+                if (!string.IsNullOrEmpty(etag) && !etag.Contains('-'))
+                    return etag.ToLowerInvariant();
+            }
+            catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+        }
+
+        if (budget < VfsHashBudget.Compute) return null;
+
+        string? computed;
+        await using (var content = await OpenReadAsync(new VfsNodeRequest(path), ct))
+        {
+            if (content is null) return null;
+            computed = await VfsHashing.ComputeAsync(content, algorithm, ct);
+        }
+
+        if (computed is null) return null;
+
+        // Local cache first - free, and no opt-in needed.
+        if (_mirror is not null) await _mirror.SetPropertyAsync(path, key, computed, ct);
+
+        // Writing back to S3 goes in a tag, not metadata: metadata is immutable and would mean copying
+        // the object onto itself, whereas PutObjectTagging updates in place and leaves the ETag alone.
+        if (budget >= VfsHashBudget.ComputeAndStore)
+            await TagHashAsync(path, algorithm, computed, ct);
+
+        return computed;
+    }
+
     // -- Catalog mirror (IRefreshableCache) ---------------------------------------
 
     /// <summary>Force a re-sync of the mirror against the bucket (picks up changes made outside this VFS).</summary>
@@ -389,6 +512,32 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
 // S3 has no streaming-append write, so we stage locally then upload atomically.
 // S3's LastModified is service-controlled, so a requested timestamp travels in custom object
 // metadata and is preferred over the service value when reading back.
+/// <summary>
+/// An <see cref="S3Node"/>'s hashing bound to one entry.
+/// </summary>
+internal sealed class S3EntryHashing(S3Node node, VfsPath path) : IContentHashing
+{
+    /// <summary>
+    /// MD5, from the object's ETag - but only for an object uploaded in a single part. A multipart
+    /// ETag is a hash of the part hashes with a "-N" suffix and is not the object's md5 at all, so it
+    /// is refused rather than returned as if it were.
+    /// </summary>
+    public IReadOnlyList<string> NativeAlgorithms { get; } = [VfsHashAlgorithms.Md5];
+
+    /// <summary>
+    /// </summary>
+    /// <summary>
+    /// The standard algorithms, by downloading the object. Advertised because the caller has to opt in
+    /// with <see cref="VfsHashBudget.Compute"/> - it is never reached by accident.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = VfsHashing.Computable;
+
+    /// <inheritdoc/>
+    public Task<string?> GetHashAsync(
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, budget, ct);
+}
+
 internal static class S3Timestamps
 {
     public static Dictionary<string, string>? ForWrite(VfsWriteOptions options)
@@ -422,12 +571,15 @@ internal sealed class S3CommitStream : Stream
     private readonly FileStream       _temp;
     private readonly Func<long, Task>? _onCommitted;   // write-through the mirror (size in bytes)
     private readonly IDictionary<string, string>? _metadata;
+    private readonly ChecksumAlgorithm? _checksum;
     private          bool             _committed;
 
     public S3CommitStream(IAmazonS3 s3, string bucket, string key,
                           Func<long, Task>? onCommitted = null,
-                          IDictionary<string, string>? metadata = null)
+                          IDictionary<string, string>? metadata = null,
+                          ChecksumAlgorithm? checksum = null)
     {
+        _checksum    = checksum;
         _s3          = s3;
         _bucket      = bucket;
         _key         = key;
@@ -485,6 +637,10 @@ internal sealed class S3CommitStream : Stream
             // would mean a server-side copy of the whole object onto itself.
             if (_metadata is not null)
                 foreach (var (k, v) in _metadata) upload.Metadata.Add(k, v);
+
+            // S3 computes this server-side and stores it with the object, so it is free to read back
+            // later - and unlike an ETag it stays valid for a multipart upload.
+            if (_checksum is not null) upload.ChecksumAlgorithm = _checksum;
             await transfer.UploadAsync(upload).ConfigureAwait(false);
             if (_onCommitted is not null) await _onCommitted(size).ConfigureAwait(false);
         }

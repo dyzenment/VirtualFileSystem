@@ -12,13 +12,13 @@ public sealed class ContentHashTests
         => vfs.GetEntryCapability<IContentHashing>(path);
 
     [Fact]
-    public async Task Dedupe_ReportsStoredSha256_WithoutFetching()
+    public async Task Dedupe_ReportsStoredSha256_FromCacheAlone()
     {
         var vfs = Dedupe();
         await vfs.WriteStringAsync("/d/a.txt", "payload");
 
         // The catalog holds the hash from the write, so the free path must answer.
-        var hash = await Hashing(vfs, "/d/a.txt")!.GetHashAsync(VfsHashAlgorithms.Sha256, withoutFetching: true);
+        var hash = await Hashing(vfs, "/d/a.txt")!.GetHashAsync(VfsHashAlgorithms.Sha256, VfsHashBudget.Cached);
         Assert.False(string.IsNullOrEmpty(hash));
     }
 

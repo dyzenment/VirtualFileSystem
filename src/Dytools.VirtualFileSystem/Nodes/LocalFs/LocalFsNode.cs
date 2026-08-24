@@ -359,4 +359,49 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         catch (IOException)                   { return null; }
         catch (UnauthorizedAccessException)   { return null; }
     }
+
+    // -- Content hashes --------------------------------------------------------
+
+    /// <summary>Hashing bound to the entry asked for.</summary>
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
+        => new LocalFsEntryHashing(this, relativePath) as T;
+
+    // Serves LocalFsEntryHashing. Local disk is the one backend where computing is cheap enough to
+    // just do, so there is nothing to report natively and nothing to refuse.
+    internal async Task<string?> ComputeHashAsync(
+        VfsPath path, string algorithm, CancellationToken ct)
+    {
+        var stream = await OpenReadAsync(new VfsNodeRequest(path), ct);
+        if (stream is null) return null;
+
+        await using (stream)
+            return await VfsHashing.ComputeAsync(stream, algorithm, ct);
+    }
+}
+
+/// <summary>
+/// A <see cref="LocalFsNode"/>'s hashing bound to one entry.
+/// </summary>
+internal sealed class LocalFsEntryHashing(LocalFsNode node, VfsPath path) : IContentHashing
+{
+    /// <summary>
+    /// Empty. A local filesystem stores no content hash, so there is never a free answer - unlike a
+    /// remote store, where the backend has usually already computed one.
+    /// </summary>
+    public IReadOnlyList<string> NativeAlgorithms { get; } = [];
+
+    /// <summary>
+    /// The standard algorithms. Computing means reading the file, which on local disk is cheap enough
+    /// to be worth offering - and it is what makes a local side comparable with a remote one.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = VfsHashing.Computable;
+
+    /// <inheritdoc/>
+    public Task<string?> GetHashAsync(
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
+        // Every answer here reads the file, and there is nowhere to store one - a local filesystem has
+        // no metadata slot for it - so ComputeAndStore does exactly what Compute does.
+        => budget < VfsHashBudget.Compute
+            ? Task.FromResult<string?>(null)
+            : node.ComputeHashAsync(path, algorithm, ct);
 }

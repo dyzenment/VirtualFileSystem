@@ -14,6 +14,11 @@ namespace Dytools.VirtualFileSystem;
 /// </summary>
 public static class VirtualFileSystemExtensions
 {
+    // Encoding.UTF8 emits a byte-order mark, so writing through it silently prepends three bytes that
+    // nobody asked for - invisible on read-back, since StreamReader strips it again, but very visible
+    // to anything hashing or byte-comparing the file. Default to UTF-8 without one.
+    private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+
     // -- Text ------------------------------------------------------------------
 
     /// <summary>Reads the whole entry as text, or null when it does not exist.</summary>
@@ -22,7 +27,7 @@ public static class VirtualFileSystemExtensions
     {
         await using var stream = await vfs.OpenReadAsync(path, ct);
         if (stream is null) return null;
-        using var reader = new StreamReader(stream, encoding ?? Encoding.UTF8);
+        using var reader = new StreamReader(stream, encoding ?? Utf8NoBom);
         return await reader.ReadToEndAsync(ct);
     }
 
@@ -33,7 +38,7 @@ public static class VirtualFileSystemExtensions
     {
         await using var stream = await vfs.OpenWriteAsync(path, VfsWriteOptions.Default, ct);
         // Flushed before the VFS stream is disposed - disposing it is what commits the write.
-        await using var writer = new StreamWriter(stream, encoding ?? Encoding.UTF8, leaveOpen: true);
+        await using var writer = new StreamWriter(stream, encoding ?? Utf8NoBom, leaveOpen: true);
         await writer.WriteAsync(content.AsMemory(), ct);
         await writer.FlushAsync(ct);
     }

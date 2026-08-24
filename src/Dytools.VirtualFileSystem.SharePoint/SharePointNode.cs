@@ -467,7 +467,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
     // Serves SharePointEntryHashing.
     internal async Task<string?> GetEntryHashAsync(
-        VfsPath path, string algorithm, bool withoutFetching, CancellationToken ct)
+        VfsPath path, string algorithm, VfsHashBudget budget, CancellationToken ct)
     {
         var key = VfsPropertyKeys.HashKey(algorithm);
 
@@ -478,11 +478,30 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             && !string.IsNullOrEmpty(mirrored))
             return mirrored;
 
-        // Otherwise it costs a round-trip per entry, which is what the caller asked to avoid.
-        if (withoutFetching) return null;
+        if (budget < VfsHashBudget.Fetch) return null;
 
+        // One request per entry - fine for a file, wrong for a loop over a library.
         var info = await GetInfoAsync(new VfsNodeRequest(path), ct);
-        return info?.Properties.TryGetValue(key, out var fetched) == true ? fetched : null;
+        if (info?.Properties.TryGetValue(key, out var fetched) == true && !string.IsNullOrEmpty(fetched))
+            return fetched;
+
+        // Graph reports quickXor and nothing else here, so any other algorithm means downloading.
+        if (budget < VfsHashBudget.Compute) return null;
+
+        string? computed;
+        await using (var content = await OpenReadAsync(new VfsNodeRequest(path), ct))
+        {
+            if (content is null) return null;
+            computed = await VfsHashing.ComputeAsync(content, algorithm, ct);
+        }
+
+        // Park it on the mirrored row - our own cache, so no opt-in. A driveItem has no arbitrary
+        // metadata slot, so there is nowhere in SharePoint itself to write it and ComputeAndStore
+        // behaves as Compute does.
+        if (computed is not null && _mirror is not null)
+            await _mirror.SetPropertyAsync(path, key, computed, ct);
+
+        return computed;
     }
 
     // -- Catalog mirror sync ---------------------------------------------------
@@ -652,13 +671,15 @@ internal sealed class SharePointEntryHashing(SharePointNode node, VfsPath path) 
     public IReadOnlyList<string> NativeAlgorithms { get; } = [VfsHashAlgorithms.QuickXor];
 
     /// <summary>
-    /// Empty. Computing a hash here means downloading the whole item - the caller's decision to make,
-    /// not something to hide behind what looks like a metadata lookup.
     /// </summary>
-    public IReadOnlyList<string> ComputableAlgorithms { get; } = [];
+    /// <summary>
+    /// The standard algorithms, by downloading the item. Advertised because the caller has to opt in
+    /// with <see cref="VfsHashBudget.Compute"/> - it is never reached by accident.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = VfsHashing.Computable;
 
     /// <inheritdoc/>
     public Task<string?> GetHashAsync(
-        string algorithm, bool withoutFetching = false, CancellationToken ct = default)
-        => node.GetEntryHashAsync(path, algorithm, withoutFetching, ct);
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, budget, ct);
 }

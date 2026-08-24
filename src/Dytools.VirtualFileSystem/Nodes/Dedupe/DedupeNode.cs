@@ -268,19 +268,51 @@ public sealed class DedupeNode : VfsNodeBase
 
     // Serves DedupeEntryHashing; the bound object holds the path so the capability does not need one.
     internal async Task<string?> GetEntryHashAsync(
-        VfsPath path, string algorithm, bool withoutFetching, CancellationToken ct)
+        VfsPath path, string algorithm, VfsHashBudget budget, CancellationToken ct)
     {
-        if (!string.Equals(algorithm, VfsHashAlgorithms.Sha256, StringComparison.OrdinalIgnoreCase))
-            return null;
-
         var entry = await _catalog.GetAsync(path, ct);
         if (entry is null || entry.IsDirectory) return null;
 
-        if (entry.Hash is { Length: > 0 } stored) return stored;   // free - already on the row
-        if (withoutFetching) return null;                          // anything further reads content
+        // The identity hash sits on the row, so the configured algorithm is free at any budget.
+        if (VfsHashing.Matches(algorithm, VfsHashAlgorithms.Sha256)
+            && entry.Hash is { Length: > 0 } stored)
+            return stored;
 
-        await using var content = await OpenReadAsync(new VfsNodeRequest(path), ct);
-        return content is null ? null : await HashAsync(content);
+        // Anything else has to be read, and a stored one is already in the row's properties.
+        if (entry.Properties?.TryGetValue(VfsPropertyKeys.HashKey(algorithm), out var cached) == true
+            && !string.IsNullOrEmpty(cached))
+            return cached;
+
+        if (budget < VfsHashBudget.Compute) return null;
+
+        string? computed;
+        await using (var content = await OpenReadAsync(new VfsNodeRequest(path), ct))
+        {
+            if (content is null) return null;
+            computed = VfsHashing.Matches(algorithm, VfsHashAlgorithms.Sha256)
+                ? await HashAsync(content)
+                : await VfsHashing.ComputeAsync(content, algorithm, ct);
+        }
+
+        // The catalog is this node's own cache, so caching is not something to opt into. There is no
+        // service behind a dedupe mount, so ComputeAndStore has nothing further to do.
+        if (computed is not null)
+            await StoreHashAsync(path, entry, algorithm, computed, ct);
+
+        return computed;
+    }
+
+    // Parks a computed hash on the row. The row is the unit of invalidation: when the entry changes
+    // the row is rewritten, and the hash goes with it rather than lingering as a wrong answer.
+    private async Task StoreHashAsync(
+        VfsPath path, CatalogEntry entry, string algorithm, string value, CancellationToken ct)
+    {
+        var props = entry.Properties is null
+            ? new Dictionary<string, string?>()
+            : new Dictionary<string, string?>(entry.Properties);
+        props[VfsPropertyKeys.HashKey(algorithm)] = value;
+
+        await _catalog.PutEntryAsync(entry with { Properties = props }, ct);
     }
 
     // -- Internals -------------------------------------------------------------
@@ -357,10 +389,10 @@ internal sealed class DedupeEntryHashing(DedupeNode node, VfsPath path) : IConte
     /// Overlapping the native list is the point: only the node knows which of the two this entry
     /// costs, which is exactly what <c>withoutFetching</c> asks.
     /// </summary>
-    public IReadOnlyList<string> ComputableAlgorithms { get; } = [VfsHashAlgorithms.Sha256];
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = VfsHashing.Computable;
 
     /// <inheritdoc/>
     public Task<string?> GetHashAsync(
-        string algorithm, bool withoutFetching = false, CancellationToken ct = default)
-        => node.GetEntryHashAsync(path, algorithm, withoutFetching, ct);
+        string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, budget, ct);
 }

@@ -52,10 +52,31 @@ public sealed class NodeCatalog
     // -- Sync state (cursor, seeded marker, sync lease) - one reserved entry per key ---------------
 
     /// <summary>Reads the value of the reserved sync-state entry <paramref name="key"/>, or null if unset.</summary>
+    /// <summary>
+    /// Adds or replaces one property on an existing row, leaving the rest of it alone. Used to park a
+    /// computed hash next to the entry: the row is the unit of invalidation, so when the backend
+    /// reports the entry changed, the rebuilt row drops the hash with everything else.
+    /// </summary>
+    /// <returns>false when there is no row to attach it to.</returns>
+    public async Task<bool> SetPropertyAsync(
+        VfsPath path, string key, string value, CancellationToken ct = default)
+    {
+        if (await _catalog.GetAsync(path, ct) is not { } entry) return false;
+
+        var props = entry.Properties is null
+            ? new Dictionary<string, string?>()
+            : new Dictionary<string, string?>(entry.Properties);
+        props[key] = value;
+
+        await _catalog.PutEntryAsync(entry with { Properties = props }, ct);
+        return true;
+    }
+
     /// <summary>The mirrored entry for a path, or null when it is not mirrored.</summary>
     public ValueTask<CatalogEntry?> GetAsync(VfsPath path, CancellationToken ct = default)
         => _catalog.GetAsync(path, ct);
 
+    /// <summary>Reads a node-scoped state value (a sync cursor, a lease), or null when unset.</summary>
     public async Task<string?> GetStateAsync(string key, CancellationToken ct = default)
         => (await _catalog.GetAsync(StatePath(key), ct))?.Properties.GetString("v");
 

@@ -47,6 +47,13 @@ public sealed record VfsWriteOptions : VfsOperationOptions
     public DateTimeOffset? CreatedAt { get; init; }
 
     /// <summary>
+    /// Backend-specific options for whichever node performs the write, or null to take that node's own
+    /// defaults. See <see cref="VfsNodeWriteOptions"/>. A node ignores options that are not its own, so
+    /// carrying the wrong type is harmless rather than an error.
+    /// </summary>
+    public VfsNodeWriteOptions? NodeOptions { get; init; }
+
+    /// <summary>
     /// Lets a bare <see cref="VfsWriteMode"/> stand in wherever options are accepted, so
     /// <c>OpenWriteAsync(path, VfsWriteMode.Append)</c> keeps reading the way it always has.
     /// </summary>
