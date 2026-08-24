@@ -106,7 +106,7 @@ internal static class BasicDemo
         await WriteText(vfs, "/dedup/emails/9012/logo.png", logo);
 
         // The dedupe node exposes its catalog (the durable path→content map) as a capability.
-        var catalog = vfs.GetNodeCapability<IVfsCatalog>("/dedup")!;
+        var catalog = vfs.GetNodeCapability<IContentAddressedCatalog>("/dedup")!;
         var id      = (await catalog.GetAsync(VfsPath.From("emails/1234/logo.png")))!.ContentId!;
         Pass($"Content ID (SHA-256): {id[..16]}...");
         Pass($"Refcount after 3 writes:      {await catalog.ReferenceCountAsync(id)}  (expected: 3)");

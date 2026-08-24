@@ -43,6 +43,10 @@ public static class VfsHashing
     public static async Task<string?> ComputeAsync(
         Stream content, string algorithm, CancellationToken ct = default)
     {
+        // QuickXor is base64 by convention, not hex, so it returns before the hex encoding below.
+        if (Matches(algorithm, VfsHashAlgorithms.QuickXor))
+            return await QuickXorHash.ComputeAsync(content, ct);
+
         byte[] digest;
         if (Matches(algorithm, VfsHashAlgorithms.Md5))
             digest = await System.Security.Cryptography.MD5.HashDataAsync(content, ct);
@@ -58,7 +62,8 @@ public static class VfsHashing
 
     /// <summary>Algorithms <see cref="ComputeAsync"/> understands.</summary>
     public static IReadOnlyList<string> Computable { get; } =
-        [VfsHashAlgorithms.Md5, VfsHashAlgorithms.Sha1, VfsHashAlgorithms.Sha256];
+        [VfsHashAlgorithms.Md5, VfsHashAlgorithms.Sha1, VfsHashAlgorithms.Sha256,
+         VfsHashAlgorithms.QuickXor];
 
     /// <summary>Compares algorithm names the way the contract says to - case-insensitively.</summary>
     public static bool Matches(string requested, string algorithm)

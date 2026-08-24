@@ -101,7 +101,8 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <summary>
     /// The entry-level capability <typeparamref name="T"/> for <paramref name="path"/>, already bound to
     /// that entry - so its methods take no path - or null when the node does not expose it. The core
-    /// never calls this; it is purely a consumer escape hatch, and it does not run through middleware.
+    /// does not use this for ordinary operations; it is a consumer escape hatch, and the call itself
+    /// does not run through middleware.
     /// </summary>
     T? GetEntryCapability<T>(string path) where T : class, IEntryCapability;
 
@@ -109,7 +110,7 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// The node-level capability <typeparamref name="T"/> for whichever node serves
     /// <paramref name="path"/>, or null when that node does not expose it. Any path under the mount
     /// will do - the capability belongs to the node, not the entry. Methods that address entries take
-    /// absolute VFS paths. The core never calls this, and it does not run through middleware.
+    /// absolute VFS paths. A consumer escape hatch; the call does not run through middleware.
     /// </summary>
     T? GetNodeCapability<T>(string path) where T : class, INodeCapability;
 }

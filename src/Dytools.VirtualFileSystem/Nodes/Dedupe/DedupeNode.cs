@@ -9,7 +9,8 @@ namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 /// Content-addressable, copy-on-write dedup decorator over any inner node.
 /// <para>
 /// Bytes are stored once per unique content (keyed by hash) in the inner node under
-/// the blob prefix; an <see cref="IVfsCatalog"/> maps logical paths to those blobs and to metadata.
+/// the blob prefix; an <see cref="IContentAddressedCatalog"/> maps logical paths to those blobs and to
+/// metadata, and answers which content is already stored.
 /// Copy/Move are catalog-only (no byte movement). Identical content collapses to one
 /// blob; editing a path forks it to a new hash, leaving others untouched.
 /// </para>
@@ -28,7 +29,7 @@ namespace Dytools.VirtualFileSystem.Nodes.Dedupe;
 public sealed class DedupeNode : VfsNodeBase
 {
     private readonly IVfsNode      _inner;
-    private readonly IVfsCatalog   _catalog;
+    private readonly IContentAddressedCatalog _catalog;
     private readonly DedupeOptions _options;
 
     /// <summary>Creates a dedup node over an <paramref name="inner"/> blob store and a required <paramref name="catalog"/>.</summary>
@@ -36,7 +37,7 @@ public sealed class DedupeNode : VfsNodeBase
     /// <param name="catalog">The durable source of truth mapping logical paths to blobs and metadata.</param>
     /// <param name="options">Hashing and blob-layout options; defaults are used when <c>null</c>.</param>
     /// <exception cref="ArgumentNullException"><paramref name="catalog"/> is <c>null</c>.</exception>
-    public DedupeNode(IVfsNode inner, IVfsCatalog catalog, DedupeOptions? options = null)
+    public DedupeNode(IVfsNode inner, IContentAddressedCatalog catalog, DedupeOptions? options = null)
     {
         _inner   = inner;
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
@@ -61,10 +62,18 @@ public sealed class DedupeNode : VfsNodeBase
 
     // The catalog is required. UseDedupeCatalog is optional - it only picks a keyed/partitioned
     // catalog; without it the default registration is used.
-    private static IVfsCatalog ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
+    private static IContentAddressedCatalog ResolveCatalog(VfsMountOptions options, IServiceProvider sp)
     {
         var sel = options.Get<CatalogSelection>();
-        return CatalogResolver.Resolve(sp, sel?.ServiceKey, sel?.Partition);
+        var catalog = CatalogResolver.Resolve(sp, sel?.ServiceKey, sel?.Partition);
+
+        // A dedupe mount needs the content index, not just the namespace. Saying so here beats a
+        // null reference later when the first write tries to find whether the content is already
+        // stored.
+        return catalog as IContentAddressedCatalog
+            ?? throw new InvalidOperationException(
+                $"A dedupe mount requires a catalog implementing {nameof(IContentAddressedCatalog)}; " +
+                $"the registered {catalog.GetType().Name} only provides the namespace operations.");
     }
 
     private static DedupeOptions ResolveAlgorithm(VfsMountOptions options)

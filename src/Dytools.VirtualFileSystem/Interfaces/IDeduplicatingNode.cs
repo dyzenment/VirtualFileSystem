@@ -52,7 +52,7 @@ public interface IHardLinkStore
 /// Implemented by nodes that perform content-addressed storage with reference
 /// counting. Exposed via <c>VfsNodeBase.GetCapability&lt;IDeduplicatingNode&gt;()</c>.
 /// <para>
-/// VFS Core never calls this - it is a consumer-facing escape hatch.
+/// The pipeline does not use this for ordinary operations - it is a consumer-facing escape hatch.
 /// The node handles deduplication transparently inside <c>OpenWriteAsync</c> / <c>DeleteAsync</c>.
 /// </para>
 /// </summary>

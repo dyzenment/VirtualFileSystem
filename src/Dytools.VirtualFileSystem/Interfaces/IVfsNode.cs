@@ -41,7 +41,8 @@ public interface IVfsNode
     Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default);
 
     /// <summary>
-    /// Consumer escape hatch for behaviour tied to <em>one entry</em> - the core NEVER calls this.
+    /// Escape hatch for behaviour tied to <em>one entry</em>. The pipeline does not use it for ordinary
+    /// operations.
     /// Return an object bound to <paramref name="relativePath"/> so the capability's own methods need
     /// no path. Decorators override to decide what to forward or block.
     /// </summary>
@@ -49,7 +50,9 @@ public interface IVfsNode
     T? GetEntryCapability<T>(VfsPath relativePath) where T : class, IEntryCapability => null;
 
     /// <summary>
-    /// Consumer escape hatch for behaviour belonging to the node - the core NEVER calls this.
+    /// Escape hatch for behaviour belonging to the node. Consumer-facing, and the pipeline itself does
+    /// not use it for ordinary operations - though middleware may ask, as <c>SymlinkMiddleware</c> does
+    /// to find out whether a node deals in symlinks at all.
     /// <paramref name="mountPoint"/> is supplied so a capability that addresses entries can accept
     /// absolute VFS paths and map them itself. Capability interfaces are defined by node providers,
     /// not in the core library. Decorators override to decide what to forward or block.

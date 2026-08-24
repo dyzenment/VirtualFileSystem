@@ -23,7 +23,7 @@ namespace Dytools.VirtualFileSystem.Catalog;
 /// reference counts.
 /// </para>
 /// </remarks>
-public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
+public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog, IContentAddressedCatalog
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {

@@ -152,13 +152,21 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
     // Azure's Last-Modified is service-controlled, so a requested timestamp is carried in custom
     // blob metadata instead and preferred over the service value when reading back. Set on the
     // upload itself - there is no cheaper moment, and no separate call is needed.
+    // Azure's Last-Modified is service-controlled, so a requested timestamp is kept in custom blob
+    // metadata under these keys and preferred over the service value on read. Local to this node: no
+    // other node reads them, and nothing above the node sees them - a consumer only ever gets the
+    // normalised ModifiedAt. Named without hyphens because Azure requires metadata names to be valid
+    // C# identifiers.
+    private const string RequestedModifiedKey = "vfs_modified";
+    private const string RequestedCreatedKey  = "vfs_created";
+
     private static Dictionary<string, string>? TimestampMetadata(VfsWriteOptions options)
     {
         if (options.ModifiedAt is null && options.CreatedAt is null) return null;
 
         var meta = new Dictionary<string, string>();
-        if (options.ModifiedAt is { } m) meta[VfsPropertyKeys.RequestedModified] = m.UtcDateTime.ToString("O");
-        if (options.CreatedAt  is { } c) meta[VfsPropertyKeys.RequestedCreated]  = c.UtcDateTime.ToString("O");
+        if (options.ModifiedAt is { } m) meta[RequestedModifiedKey] = m.UtcDateTime.ToString("O");
+        if (options.CreatedAt  is { } c) meta[RequestedCreatedKey]  = c.UtcDateTime.ToString("O");
         return meta;
     }
 
@@ -315,9 +323,9 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
                     IsFile       = true,
                     IsDirectory  = false,
                     SizeBytes    = b.Properties.ContentLength,
-                    ModifiedAt   = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedModified)
+                    ModifiedAt   = MetadataTime(b.Metadata, RequestedModifiedKey)
                                    ?? b.Properties.LastModified,
-                    CreatedAt    = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedCreated)
+                    CreatedAt    = MetadataTime(b.Metadata, RequestedCreatedKey)
                                    ?? b.Properties.CreatedOn,
                     Properties   = BuildProps(b.Properties.ETag?.ToString(), b.Properties.ContentType),
                 };
@@ -354,8 +362,8 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
                 IsFile       = true,
                 IsDirectory  = false,
                 SizeBytes    = p.ContentLength,
-                ModifiedAt   = MetadataTime(p.Metadata, VfsPropertyKeys.RequestedModified) ?? p.LastModified,
-                CreatedAt    = MetadataTime(p.Metadata, VfsPropertyKeys.RequestedCreated)  ?? p.CreatedOn,
+                ModifiedAt   = MetadataTime(p.Metadata, RequestedModifiedKey) ?? p.LastModified,
+                CreatedAt    = MetadataTime(p.Metadata, RequestedCreatedKey)  ?? p.CreatedOn,
                 Properties   = BuildProps(p.ETag.ToString(), p.ContentType),
             };
         }
@@ -560,8 +568,8 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
         IsFile       = true,
         IsDirectory  = false,
         SizeBytes    = b.Properties.ContentLength,
-        ModifiedAt   = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedModified) ?? b.Properties.LastModified,
-        CreatedAt    = MetadataTime(b.Metadata, VfsPropertyKeys.RequestedCreated)  ?? b.Properties.CreatedOn,
+        ModifiedAt   = MetadataTime(b.Metadata, RequestedModifiedKey) ?? b.Properties.LastModified,
+        CreatedAt    = MetadataTime(b.Metadata, RequestedCreatedKey)  ?? b.Properties.CreatedOn,
         Properties   = BuildProps(b.Properties.ETag?.ToString(), b.Properties.ContentType),
     };
 

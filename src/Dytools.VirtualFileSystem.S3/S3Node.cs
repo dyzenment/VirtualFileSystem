@@ -251,9 +251,9 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
                 IsFile       = true,
                 IsDirectory  = false,
                 SizeBytes    = meta.ContentLength,
-                ModifiedAt   = S3Timestamps.Read(meta.Metadata, VfsPropertyKeys.RequestedModified)
+                ModifiedAt   = S3Timestamps.Read(meta.Metadata, S3Timestamps.RequestedModified)
                                ?? ToUtc(meta.LastModified),
-                CreatedAt    = S3Timestamps.Read(meta.Metadata, VfsPropertyKeys.RequestedCreated),
+                CreatedAt    = S3Timestamps.Read(meta.Metadata, S3Timestamps.RequestedCreated),
                 Properties   = props,
             };
         }
@@ -271,6 +271,21 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
                 : null;
         }
     }
+
+    // S3 hands checksums back base64; the contract asks for lowercase hex. A malformed value is
+    // treated as absent rather than thrown, so a bad header cannot fail an otherwise fine lookup.
+    private static string? TryDecodeHex(string base64)
+    {
+        try   { return Convert.ToHexStringLower(Convert.FromBase64String(base64)); }
+        catch (FormatException) { return null; }
+    }
+
+    // The checksum S3 stored for this object under the requested algorithm, base64 as S3 returns it.
+    private static string? StoredChecksum(GetObjectMetadataResponse meta, string algorithm)
+        => VfsHashing.Matches(algorithm, VfsHashAlgorithms.Sha256) ? meta.ChecksumSHA256
+         : VfsHashing.Matches(algorithm, VfsHashAlgorithms.Sha1)   ? meta.ChecksumSHA1
+         : VfsHashing.Matches(algorithm, VfsHashAlgorithms.Crc32)  ? meta.ChecksumCRC32
+         : null;
 
     // Tag key/value limits are generous next to a hash - 128 and 256 characters against 64 for a
     // sha256 hex - and tagging leaves content, ETag and version untouched. Best-effort: the hash has
@@ -341,16 +356,24 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
 
         if (budget < VfsHashBudget.Fetch) return null;
 
-        if (VfsHashing.Matches(algorithm, VfsHashAlgorithms.Md5))
+        try
         {
-            try
-            {
-                var meta = await _s3.GetObjectMetadataAsync(
-                    new GetObjectMetadataRequest
-                    {
-                        BucketName = _bucket, Key = KeyFor(Rel(new VfsNodeRequest(path))),
-                    }, ct);
+            var meta = await _s3.GetObjectMetadataAsync(
+                new GetObjectMetadataRequest
+                {
+                    BucketName   = _bucket,
+                    Key          = KeyFor(Rel(new VfsNodeRequest(path))),
+                    ChecksumMode = ChecksumMode.ENABLED,
+                }, ct);
 
+            // A checksum S3 computed and stored at upload time (see S3Options.DefaultChecksum). Unlike
+            // an ETag this is a real content hash and stays valid for a multipart upload - and S3
+            // returns it base64, so it needs re-encoding to the hex the contract asks for.
+            if (StoredChecksum(meta, algorithm) is { Length: > 0 } b64 && TryDecodeHex(b64) is { } hex)
+                return hex;
+
+            if (VfsHashing.Matches(algorithm, VfsHashAlgorithms.Md5))
+            {
                 // An ETag is the object's md5 only for a single-part upload. A multipart one carries a
                 // "-N" suffix and is a hash of part hashes, so returning it would be a wrong answer
                 // rather than a missing one.
@@ -358,10 +381,10 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
                 if (!string.IsNullOrEmpty(etag) && !etag.Contains('-'))
                     return etag.ToLowerInvariant();
             }
-            catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-            {
-                return null;
-            }
+        }
+        catch (AmazonS3Exception ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
         }
 
         if (budget < VfsHashBudget.Compute) return null;
@@ -540,13 +563,19 @@ internal sealed class S3EntryHashing(S3Node node, VfsPath path) : IContentHashin
 
 internal static class S3Timestamps
 {
+    // S3's LastModified is service-controlled, so a requested timestamp lives in custom object
+    // metadata under these keys. Local to this node - no other node reads them, and nothing above the
+    // node sees them; a consumer only ever gets the normalised ModifiedAt.
+    public const string RequestedModified = "vfs_modified";
+    public const string RequestedCreated  = "vfs_created";
+
     public static Dictionary<string, string>? ForWrite(VfsWriteOptions options)
     {
         if (options.ModifiedAt is null && options.CreatedAt is null) return null;
 
         var meta = new Dictionary<string, string>();
-        if (options.ModifiedAt is { } m) meta[VfsPropertyKeys.RequestedModified] = m.UtcDateTime.ToString("O");
-        if (options.CreatedAt  is { } c) meta[VfsPropertyKeys.RequestedCreated]  = c.UtcDateTime.ToString("O");
+        if (options.ModifiedAt is { } m) meta[S3Timestamps.RequestedModified] = m.UtcDateTime.ToString("O");
+        if (options.CreatedAt  is { } c) meta[S3Timestamps.RequestedCreated]  = c.UtcDateTime.ToString("O");
         return meta;
     }
 

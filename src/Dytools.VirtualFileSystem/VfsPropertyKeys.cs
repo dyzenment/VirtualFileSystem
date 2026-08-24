@@ -62,20 +62,6 @@ public static class VfsPropertyKeys
     public const string CachedReadStream = "vfs.node.cachedReadStream";
 
     /// <summary>
-    /// Custom object metadata carrying a caller-requested last-modified time, written by object
-    /// stores whose native Last-Modified is service-controlled and cannot be set (Azure, S3).
-    /// Value: ISO 8601 round-trip ("O") of the UTC instant.
-    /// <para>
-    /// Named to satisfy the strictest backend: Azure requires metadata names to be valid C#
-    /// identifiers, so no hyphens.
-    /// </para>
-    /// </summary>
-    public const string RequestedModified = "vfs_modified";
-
-    /// <summary>As <see cref="RequestedModified"/>, for the creation time.</summary>
-    public const string RequestedCreated = "vfs_created";
-
-    /// <summary>
     /// Prefix for a content hash the backend reported, one key per algorithm - e.g.
     /// <c>"Hash.quickxor"</c>, <c>"Hash.md5"</c>. Value: the hash as the backend expressed it.
     /// <para>

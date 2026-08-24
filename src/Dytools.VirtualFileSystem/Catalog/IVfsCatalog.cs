@@ -26,18 +26,6 @@ public interface IVfsCatalog : INodeCapability
     /// <summary>Immediate children of a directory (non-recursive).</summary>
     IAsyncEnumerable<CatalogEntry> ListChildrenAsync(VfsPath path, CancellationToken ct = default);
 
-    /// <summary>
-    /// How many file entries currently reference this content id. &gt;0 means the blob is
-    /// still needed; 0 means it is orphaned and the node may delete it.
-    /// </summary>
-    ValueTask<int> ReferenceCountAsync(string contentId, CancellationToken ct = default);
-
-    /// <summary>
-    /// The storage key already assigned to content with this hash, or null if unseen.
-    /// Lets a node dedup by hash while using a different storage key (<c>ContentId</c>).
-    /// </summary>
-    ValueTask<string?> FindContentIdByHashAsync(string hash, CancellationToken ct = default);
-
     // -- Mutations -------------------------------------------------------------
 
     /// <summary>
@@ -107,6 +95,13 @@ public interface IVfsCatalog : INodeCapability
 /// </summary>
 public interface IPartitionedVfsCatalog : IVfsCatalog
 {
-    /// <summary>Returns an isolated, independently reference-counted view of this catalog for the given partition key.</summary>
+    /// <summary>
+    /// An isolated, independently reference-counted view of this catalog for the given partition key.
+    /// <para>
+    /// Typed as the namespace interface because partitioning and content-addressing are unrelated - a
+    /// catalog can offer either without the other. A partition of a catalog that does index content is
+    /// still content-addressed, so a node needing that can ask for it.
+    /// </para>
+    /// </summary>
     IVfsCatalog ForPartition(string partitionKey);
 }

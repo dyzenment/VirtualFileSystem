@@ -127,7 +127,7 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         // Each iteration follows one hop; depth counts total hops this call.
         for (var depth = 0; ; depth++)
         {
-            if (!IsSymlinkCapable(ctx.ResolvedNode)) return;
+            if (!IsSymlinkCapable(ctx.ResolvedNode, ctx.MountPoint)) return;
 
             if (depth >= MaxDepth)
                 throw new InvalidOperationException(
@@ -154,7 +154,9 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         }
     }
 
-    private bool IsSymlinkCapable(IVfsNode node)
-        => node.GetNodeCapability<ISymlinkCapableNode>(default) is not null
+    // Asked through the capability rather than a type test, so a decorator gets its say: a reroute
+    // node forwards to whatever it points at, and a node that wants to hide its symlinks can refuse.
+    private bool IsSymlinkCapable(IVfsNode node, VfsPath mountPoint)
+        => node.GetNodeCapability<ISymlinkCapableNode>(mountPoint) is not null
         || (_extraNodeTypes?.Contains(node.GetType()) == true);
 }

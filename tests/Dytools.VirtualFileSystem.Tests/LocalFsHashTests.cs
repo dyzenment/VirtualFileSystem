@@ -98,7 +98,22 @@ public sealed class LocalFsHashTests : IDisposable
     {
         var vfs = Create();
         await vfs.WriteStringAsync("/local/a.txt", "x");
-        Assert.Null(await Hashing(vfs, "/local/a.txt").GetHashAsync(VfsHashAlgorithms.QuickXor, VfsHashBudget.Compute));
+
+        // CRC32 has no implementation here; asking for it is answered with null rather than a throw.
+        Assert.Null(await Hashing(vfs, "/local/a.txt")
+            .GetHashAsync(VfsHashAlgorithms.Crc32, VfsHashBudget.Compute));
+    }
+
+    [Fact]
+    public async Task QuickXor_IsComputableLocally_WhichIsWhatMakesSharePointComparable()
+    {
+        var vfs = Create();
+        await vfs.WriteStringAsync("/local/a.txt", "x");
+
+        var cap = Hashing(vfs, "/local/a.txt");
+        Assert.Contains(VfsHashAlgorithms.QuickXor, cap.ComputableAlgorithms);
+        Assert.False(string.IsNullOrEmpty(
+            await cap.GetHashAsync(VfsHashAlgorithms.QuickXor, VfsHashBudget.Compute)));
     }
 
     [Fact]

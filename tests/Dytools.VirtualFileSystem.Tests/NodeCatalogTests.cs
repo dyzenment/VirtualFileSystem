@@ -151,7 +151,7 @@ public sealed class CatalogMirrorTests
 
     // Cancels the supplied token right after the value entry for `key` is written (splitter step 4),
     // so we can exercise the cancel-rollback path deterministically.
-    private sealed class CancelAfterKeyWrite(IVfsCatalog inner, string key, CancellationTokenSource cts) : IVfsCatalog
+    private sealed class CancelAfterKeyWrite(IContentAddressedCatalog inner, string key, CancellationTokenSource cts) : IContentAddressedCatalog
     {
         public async ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry entry, CancellationToken ct = default)
         {
