@@ -129,7 +129,7 @@ internal static class CloudSmokeTest
         Console.WriteLine();
         await Step("delta change feed", async () =>
         {
-            var feed = vfs.GetCapability<ISharePointChangeFeed>("/sp")
+            var feed = vfs.GetNodeCapability<ISharePointChangeFeed>("/sp")
                        ?? throw new Exception("ISharePointChangeFeed capability not available");
             var batch = await feed.GetChangesAsync(null);
             Console.Write($"{batch.Changes.Count} change(s), cursor {(string.IsNullOrEmpty(batch.Cursor) ? "none" : "returned")} ");

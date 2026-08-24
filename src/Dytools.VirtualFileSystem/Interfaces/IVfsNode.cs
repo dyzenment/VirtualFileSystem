@@ -41,11 +41,21 @@ public interface IVfsNode
     Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default);
 
     /// <summary>
-    /// Consumer escape hatch - the core NEVER calls this. Nodes expose optional extended behaviour
-    /// (<c>IContentHashCapability</c>, <c>ISearchCapability</c>, etc.). Capability interfaces are defined
-    /// by individual node providers, not in the core library. Decorators override to decide what to forward or block.
+    /// Consumer escape hatch for behaviour tied to <em>one entry</em> - the core NEVER calls this.
+    /// Return an object bound to <paramref name="relativePath"/> so the capability's own methods need
+    /// no path. Decorators override to decide what to forward or block.
     /// </summary>
-    T? GetCapability<T>() where T : class => null;
+    /// <param name="relativePath">The entry, relative to this node's mount.</param>
+    T? GetEntryCapability<T>(VfsPath relativePath) where T : class, IEntryCapability => null;
+
+    /// <summary>
+    /// Consumer escape hatch for behaviour belonging to the node - the core NEVER calls this.
+    /// <paramref name="mountPoint"/> is supplied so a capability that addresses entries can accept
+    /// absolute VFS paths and map them itself. Capability interfaces are defined by node providers,
+    /// not in the core library. Decorators override to decide what to forward or block.
+    /// </summary>
+    /// <param name="mountPoint">The mount prefix this node is serving.</param>
+    T? GetNodeCapability<T>(VfsPath mountPoint) where T : class, INodeCapability => null;
 }
 
 /// <summary>Controls how an existing entry is treated when opening a write stream.</summary>

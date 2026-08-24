@@ -106,7 +106,7 @@ internal static class BasicDemo
         await WriteText(vfs, "/dedup/emails/9012/logo.png", logo);
 
         // The dedupe node exposes its catalog (the durable path→content map) as a capability.
-        var catalog = vfs.GetCapability<IVfsCatalog>("/dedup")!;
+        var catalog = vfs.GetNodeCapability<IVfsCatalog>("/dedup")!;
         var id      = (await catalog.GetAsync(VfsPath.From("emails/1234/logo.png")))!.ContentId!;
         Pass($"Content ID (SHA-256): {id[..16]}...");
         Pass($"Refcount after 3 writes:      {await catalog.ReferenceCountAsync(id)}  (expected: 3)");
@@ -133,7 +133,7 @@ internal static class BasicDemo
         Pass($"Files listed under /dedup:    {await CountFiles(vfs, "/dedup")}  (expected: 0)");
 
         // InMemoryKvNode does NOT expose a catalog - the capability query returns null.
-        var noCatalog = vfs.GetCapability<IVfsCatalog>("/mem/documents/readme.txt");
+        var noCatalog = vfs.GetNodeCapability<IVfsCatalog>("/mem/documents/readme.txt");
         Pass($"InMemoryKvNode IVfsCatalog: {noCatalog?.ToString() ?? "null (as expected)"}");
     }
 

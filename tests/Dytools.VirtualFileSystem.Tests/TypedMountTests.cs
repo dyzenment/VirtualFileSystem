@@ -50,6 +50,7 @@ public sealed class TypedMountTests
         services.AddVirtualFileSystem().MountSingleton<LocalFsNode>("/disk");   // forgot UseLocalFileSystemPath
         var vfs = services.BuildServiceProvider().GetRequiredService<IVirtualFileSystem>();
 
-        Assert.ThrowsAny<Exception>(() => vfs.GetCapability<object>("/disk/x"));
+        // Any capability lookup forces the node to be built, which is what should fail here.
+        Assert.ThrowsAny<Exception>(() => vfs.GetNodeCapability<INodeCapability>("/disk/x"));
     }
 }

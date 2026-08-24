@@ -24,15 +24,35 @@ public sealed class MiddlewareTests
     }
 
     [Fact]
-    public async Task Symlink_GetInfo_IsSymlink_True()
+    public async Task Symlink_GetInfo_Followed_DescribesTheTarget()
     {
         var node = new SymlinkTestNode();
         node.Store("target.dat", Encoding.UTF8.GetBytes("x"));
         node.StoreSymlink("link.lnk", "/s/target.dat");
 
-        var vfs = VfsFactory.Build(b => b.Mount("/s", node).UseSymlinks());
+        var vfs  = VfsFactory.Build(b => b.Mount("/s", node).UseSymlinks());
         var info = await vfs.GetInfoAsync("/s/link.lnk");
-        Assert.True(info?.IsSymlink);
+
+        // Following lands on the target, and a target is not itself a link.
+        Assert.True(info!.FollowedSymlink);
+        Assert.False(info.IsSymlink);
+        Assert.Equal("target.dat", info.Name);
+    }
+
+    [Fact]
+    public async Task Symlink_GetInfo_NoFollow_DescribesTheLink()
+    {
+        var node = new SymlinkTestNode();
+        node.Store("target.dat", Encoding.UTF8.GetBytes("x"));
+        node.StoreSymlink("link.lnk", "/s/target.dat");
+
+        var vfs  = VfsFactory.Build(b => b.Mount("/s", node).UseSymlinks());
+        var info = await vfs.GetInfoAsync("/s/link.lnk", VfsMetadataOptions.NoFollow);
+
+        Assert.True(info!.IsSymlink);
+        Assert.False(info.FollowedSymlink);
+        Assert.Equal("link.lnk", info.Name);
+        Assert.Equal("/s/target.dat", info.SymlinkTarget);
     }
 
     [Fact]
@@ -194,19 +214,18 @@ internal sealed class SymlinkTestNode : VfsNodeBase, ISymlinkCapableNode
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
     {
         var key = new string(req.Path.PathSpan);
-        IReadOnlyDictionary<string, string?> props = ImmutableDictionary<string, string?>.Empty;
+        var isLink = _symlinks.TryGetValue(key, out var target);
 
-        if (_symlinks.TryGetValue(key, out var target))
-            props = new Dictionary<string, string?> { [VfsPropertyKeys.SymlinkTarget] = target };
-        else if (!_data.ContainsKey(key))
+        if (!isLink && !_data.ContainsKey(key))
             return Task.FromResult<VfsNodeInfo?>(null);
 
         return Task.FromResult<VfsNodeInfo?>(new VfsNodeInfo
         {
-            RelativePath = req.Path,
-            IsFile       = true,
-            IsDirectory  = false,
-            Properties   = props,
+            RelativePath  = req.Path,
+            IsFile        = true,
+            IsDirectory   = false,
+            IsSymlink     = isLink,
+            SymlinkTarget = isLink ? target : null,
         });
     }
 

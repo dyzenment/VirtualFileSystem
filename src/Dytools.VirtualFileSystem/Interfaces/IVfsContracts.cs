@@ -34,6 +34,18 @@ public interface IVfsMountRegistry
     /// </param>
     (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(
         VfsPath path, IServiceProvider? serviceProvider = null, bool internalAllowed = false);
+
+    /// <summary>
+    /// Whether anything could route a child of this directory somewhere other than the directory's own
+    /// mount - an alias key sitting under <paramref name="inputPath"/>, or a mount key sitting under
+    /// <paramref name="resolvedPath"/>.
+    /// <para>
+    /// Asked once per listing so the listing does not have to re-resolve every entry it returns. Two
+    /// paths because the two tables are matched at different stages: aliases expand from the caller's
+    /// path before dispatch, mounts match the path that expansion produced.
+    /// </para>
+    /// </summary>
+    bool HasShadowingUnder(VfsPath inputPath, VfsPath resolvedPath);
 }
 
 /// <summary>

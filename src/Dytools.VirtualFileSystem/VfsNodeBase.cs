@@ -86,9 +86,13 @@ public abstract class VfsNodeBase : IVfsNode
         {
             ct.ThrowIfCancellationRequested();
 
-            var kindOk = child.IsDirectory
-                ? (options.Kind & VfsEntryKind.Directories) != 0
-                : (options.Kind & VfsEntryKind.Files) != 0;
+            // A symlink is matched on being a link first: asking for Symlinks alone should return
+            // pointers whatever they point at, and asking for Files alone should not sweep them in.
+            var kindOk = child.IsSymlink
+                ? (options.Kind & VfsEntryKind.Symlinks) != 0
+                : child.IsDirectory
+                    ? (options.Kind & VfsEntryKind.Directories) != 0
+                    : (options.Kind & VfsEntryKind.Files) != 0;
             if (kindOk && (options.IncludeHidden || !child.IsHidden) && glob.IsMatch(child.RelativePath.NameSpan))
                 yield return child;
 
@@ -143,12 +147,24 @@ public abstract class VfsNodeBase : IVfsNode
     }
 
     /// <summary>
-    /// Consumer escape hatch to obtain a capability interface implemented by this node. The base returns
-    /// <c>this as T</c> - so any node that implements a capability interface exposes it automatically.
-    /// Decorators override to forward or block specific capabilities. Example: an encryption node blocks
-    /// <c>IContentHashCapability</c> (hash of ciphertext is meaningless).
+    /// Entry-level capability. The base returns null: an entry capability is bound to one entry, which
+    /// a node serving every path under its mount cannot be, so a node exposing one has to build it.
+    /// Decorators override to forward or block. An encryption node, for instance, should refuse a
+    /// hashing capability - a hash of ciphertext answers nothing.
     /// </summary>
     /// <typeparam name="T">The capability interface requested.</typeparam>
-    /// <returns>The capability implementation, or <c>null</c> if this node does not expose it.</returns>
-    public virtual T? GetCapability<T>() where T : class => this as T;
+    /// <param name="relativePath">The entry, relative to this node's mount.</param>
+    /// <returns>The capability bound to that entry, or null if this node does not expose it.</returns>
+    public virtual T? GetEntryCapability<T>(VfsPath relativePath) where T : class, IEntryCapability
+        => null;
+
+    /// <summary>
+    /// Node-level capability. The base returns <c>this as T</c>, so a node implementing the interface
+    /// exposes it automatically. Override to forward or block.
+    /// </summary>
+    /// <typeparam name="T">The capability interface requested.</typeparam>
+    /// <param name="mountPoint">The mount prefix this node is serving.</param>
+    /// <returns>The capability, or null if this node does not expose it.</returns>
+    public virtual T? GetNodeCapability<T>(VfsPath mountPoint) where T : class, INodeCapability
+        => this as T;
 }

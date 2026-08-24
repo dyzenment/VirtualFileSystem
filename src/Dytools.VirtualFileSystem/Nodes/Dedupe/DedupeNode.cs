@@ -251,12 +251,37 @@ public sealed class DedupeNode : VfsNodeBase
     }
 
     /// <summary>
-    /// Exposes the catalog so consumers can inspect it: <c>vfs.GetCapability&lt;IVfsCatalog&gt;(path)</c>.
-    /// Otherwise defers to the base capability lookup.
+    /// Exposes the catalog so consumers can inspect it:
+    /// <c>vfs.GetNodeCapability&lt;IVfsCatalog&gt;(path)</c>. Otherwise defers to the base lookup.
     /// </summary>
     /// <typeparam name="T">The capability interface requested.</typeparam>
     /// <returns>The catalog when assignable to <typeparamref name="T"/>, otherwise the base lookup result, or <c>null</c>.</returns>
-    public override T? GetCapability<T>() where T : class => _catalog as T ?? base.GetCapability<T>();
+    public override T? GetNodeCapability<T>(VfsPath mountPoint) where T : class
+        => _catalog as T ?? base.GetNodeCapability<T>(mountPoint);
+
+    /// <summary>
+    /// Hashing, bound to the entry asked for. The catalog already stores each entry's sha256 - it is
+    /// the content identity deduplication keys on - so the common answer costs nothing.
+    /// </summary>
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
+        => new DedupeEntryHashing(this, relativePath) as T;
+
+    // Serves DedupeEntryHashing; the bound object holds the path so the capability does not need one.
+    internal async Task<string?> GetEntryHashAsync(
+        VfsPath path, string algorithm, bool withoutFetching, CancellationToken ct)
+    {
+        if (!string.Equals(algorithm, VfsHashAlgorithms.Sha256, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var entry = await _catalog.GetAsync(path, ct);
+        if (entry is null || entry.IsDirectory) return null;
+
+        if (entry.Hash is { Length: > 0 } stored) return stored;   // free - already on the row
+        if (withoutFetching) return null;                          // anything further reads content
+
+        await using var content = await OpenReadAsync(new VfsNodeRequest(path), ct);
+        return content is null ? null : await HashAsync(content);
+    }
 
     // -- Internals -------------------------------------------------------------
 
@@ -316,4 +341,26 @@ public sealed class DedupeNode : VfsNodeBase
             Properties   = props,
         };
     }
+}
+
+/// <summary>
+/// A <see cref="DedupeNode"/>'s hashing bound to one entry - what
+/// <c>GetEntryCapability&lt;IContentHashing&gt;</c> hands back, so the interface needs no path.
+/// </summary>
+internal sealed class DedupeEntryHashing(DedupeNode node, VfsPath path) : IContentHashing
+{
+    /// <summary>SHA-256: the catalog stores it for every entry, being the identity dedup keys on.</summary>
+    public IReadOnlyList<string> NativeAlgorithms { get; } = [VfsHashAlgorithms.Sha256];
+
+    /// <summary>
+    /// SHA-256 again - an entry whose row carries no hash can still be hashed by reading it back.
+    /// Overlapping the native list is the point: only the node knows which of the two this entry
+    /// costs, which is exactly what <c>withoutFetching</c> asks.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = [VfsHashAlgorithms.Sha256];
+
+    /// <inheritdoc/>
+    public Task<string?> GetHashAsync(
+        string algorithm, bool withoutFetching = false, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, withoutFetching, ct);
 }

@@ -237,7 +237,7 @@ public sealed class DedupeNodeTests
     {
         var catalog = new InMemoryVfsCatalog();
         var node = new DedupeNode(new BlobStoreNode(), catalog);
-        Assert.Same(catalog, node.GetCapability<IVfsCatalog>());
+        Assert.Same(catalog, node.GetNodeCapability<IVfsCatalog>(default));
     }
 
     [Fact]

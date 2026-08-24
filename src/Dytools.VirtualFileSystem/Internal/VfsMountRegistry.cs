@@ -180,6 +180,23 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
         return (node, matchKey, resolvedPath);
     }
 
+    public bool HasShadowingUnder(VfsPath inputPath, VfsPath resolvedPath)
+    {
+        // An alias or mount at or ABOVE the listed directory already applied to the directory itself and
+        // is therefore uniform across every child - it cannot make one entry differ from another. Only a
+        // key strictly BELOW can shadow an individual child, so that is all this looks for.
+        foreach (var (alias, _, _) in _aliases)
+            if (IsStrictlyUnder(alias, inputPath)) return true;
+
+        foreach (var (key, _, _) in _mounts)
+            if (IsStrictlyUnder(key, resolvedPath)) return true;
+
+        return _parent?.HasShadowingUnder(inputPath, resolvedPath) == true;
+    }
+
+    private static bool IsStrictlyUnder(VfsPath candidate, VfsPath root)
+        => candidate.PathSpan.Length > root.PathSpan.Length && candidate.StartsWith(root);
+
     // -- Alias expansion -------------------------------------------------------
 
     // Returns the expanded path (null if no alias matched) and whether the FIRST alias the

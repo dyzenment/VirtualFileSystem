@@ -180,7 +180,7 @@ public sealed class GetInfoListTests
     {
         var vfs = VfsFactory.CreateDual();
         // InMemoryKvNode does not implement IDeduplicatingNode
-        var cap = vfs.GetCapability<IDeduplicatingNode>("/a/file.txt");
+        var cap = vfs.GetNodeCapability<IDeduplicatingNode>("/a/file.txt");
         Assert.Null(cap);
     }
 }

@@ -61,14 +61,28 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <summary>Deletes the entry at <paramref name="path"/>.</summary>
     Task            DeleteAsync(string path, CancellationToken ct = default);
 
-    /// <summary>Returns whether an entry exists at <paramref name="path"/>.</summary>
+    /// <summary>Returns whether an entry exists at <paramref name="path"/>, following symlinks.</summary>
     Task<bool>      ExistsAsync(string path, CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns whether an entry exists at <paramref name="path"/>. Pass
+    /// <see cref="VfsMetadataOptions.NoFollow"/> to ask about a symlink itself, which is the only way
+    /// to see a link whose target is missing.
+    /// </summary>
+    Task<bool>      ExistsAsync(string path, VfsMetadataOptions? options, CancellationToken ct = default);
 
     /// <summary>
     /// Returns metadata for the entry, or null when the path does not exist. The Path in the returned
     /// <see cref="VfsEntryInfo"/> is always the canonical VFS path with correct casing as reported by the node.
     /// </summary>
     Task<VfsEntryInfo?>            GetInfoAsync(string path, CancellationToken ct = default);
+
+    /// <summary>
+    /// Metadata for the entry, or null when the path does not exist. Pass
+    /// <see cref="VfsMetadataOptions.NoFollow"/> to describe a symlink itself rather than its target -
+    /// the <c>lstat</c> to the default's <c>stat</c>.
+    /// </summary>
+    Task<VfsEntryInfo?>            GetInfoAsync(string path, VfsMetadataOptions? options, CancellationToken ct = default);
 
     /// <summary>Names only - lightweight enumeration of the directory's immediate children.</summary>
     IAsyncEnumerable<string>       ListAsync(string path, CancellationToken ct = default);
@@ -85,9 +99,17 @@ public interface IVirtualFileSystem : IAsyncDisposable
     IAsyncEnumerable<VfsEntryInfo> ListInfoAsync(string path, VfsListOptions options, CancellationToken ct = default);
 
     /// <summary>
-    /// Resolves <paramref name="path"/> to its node, then calls <c>node.GetCapability&lt;T&gt;()</c>.
-    /// Returns null if the node does not expose <typeparamref name="T"/>. The core never calls this -
-    /// purely a consumer escape hatch.
+    /// The entry-level capability <typeparamref name="T"/> for <paramref name="path"/>, already bound to
+    /// that entry - so its methods take no path - or null when the node does not expose it. The core
+    /// never calls this; it is purely a consumer escape hatch, and it does not run through middleware.
     /// </summary>
-    T? GetCapability<T>(string path) where T : class;
+    T? GetEntryCapability<T>(string path) where T : class, IEntryCapability;
+
+    /// <summary>
+    /// The node-level capability <typeparamref name="T"/> for whichever node serves
+    /// <paramref name="path"/>, or null when that node does not expose it. Any path under the mount
+    /// will do - the capability belongs to the node, not the entry. Methods that address entries take
+    /// absolute VFS paths. The core never calls this, and it does not run through middleware.
+    /// </summary>
+    T? GetNodeCapability<T>(string path) where T : class, INodeCapability;
 }

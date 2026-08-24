@@ -16,7 +16,7 @@ namespace Dytools.VirtualFileSystem.Catalog;
 /// nodes. Implementations must be safe for concurrent use.
 /// </para>
 /// </remarks>
-public interface IVfsCatalog
+public interface IVfsCatalog : INodeCapability
 {
     // -- Lookup / listing ------------------------------------------------------
 

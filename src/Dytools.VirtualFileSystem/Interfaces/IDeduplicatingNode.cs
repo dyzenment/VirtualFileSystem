@@ -12,7 +12,7 @@ namespace Dytools.VirtualFileSystem;
 /// pass its <see cref="System.Type"/> to <c>IVfsBuilder.UseSymlinks(typeof(ThirdPartyNode))</c>.
 /// </para>
 /// </summary>
-public interface ISymlinkCapableNode { }
+public interface ISymlinkCapableNode : INodeCapability { }
 
 /// <summary>
 /// Maps VFS paths to stable content identifiers (e.g. SHA-256 hash) and
@@ -59,7 +59,7 @@ public interface IHardLinkStore
 /// <remarks>
 /// Usage:
 /// <code>
-///   var dedup = vfs.GetCapability&lt;IDeduplicatingNode&gt;("/s3/attachments/logo.png");
+///   var dedup = vfs.GetNodeCapability&lt;IDeduplicatingNode&gt;("/s3/attachments/logo.png");
 ///   if (dedup is not null)
 ///   {
 ///       var id    = await dedup.HardLinks.ResolveContentIdAsync("attachments/logo.png");
@@ -68,7 +68,7 @@ public interface IHardLinkStore
 ///   }
 /// </code>
 /// </remarks>
-public interface IDeduplicatingNode
+public interface IDeduplicatingNode : INodeCapability
 {
     /// <summary>The hard-link store backing this node's content-addressed storage.</summary>
     IHardLinkStore HardLinks { get; }

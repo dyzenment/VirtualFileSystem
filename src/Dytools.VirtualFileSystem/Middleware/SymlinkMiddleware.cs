@@ -101,11 +101,27 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         return await next(ctx, ct);
     }
 
-    // Delete, Copy, Move, Exists, List - inherit transparent pass-through.
+    // Exists follows too, so that it agrees with GetInfo. Without this, a link whose target is gone
+    // reports Exists=true and GetInfo=null - "it is there but has no metadata", which nothing can act
+    // on sensibly. POSIX draws the same line: `test -e` on a dangling link is false (it stats), while
+    // `test -L` is true. VfsMetadataOptions.NoFollow is the `-L`.
+    public async Task<bool> InvokeExistsAsync(
+        VfsContext ctx,
+        Func<VfsContext, CancellationToken, Task<bool>> next,
+        CancellationToken ct)
+    {
+        await FollowAsync(ctx, ct);
+        return await next(ctx, ct);
+    }
+
+    // Delete, Copy, Move, List - inherit transparent pass-through.
     // These operations act on the symlink pointer itself, not the target.
 
     private async Task FollowAsync(VfsContext ctx, CancellationToken ct)
     {
+        // The caller asked to be told about the link rather than what it points at.
+        if (ctx.MetadataOptions is { FollowSymlinks: false }) return;
+
         // Loop until the resolved node is not a symlink or is not symlink-capable.
         // Each iteration follows one hop; depth counts total hops this call.
         for (var depth = 0; ; depth++)
@@ -117,7 +133,8 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
                     $"Symlink depth limit ({MaxDepth}) exceeded at: {ctx.Path.ToString()}");
 
             var info = await ctx.ResolvedNode.GetInfoAsync(ctx.BuildNodeRequest(), ct);
-            if (info?.Properties.TryGetValue(VfsPropertyKeys.SymlinkTarget, out var raw) != true)
+            // The node reports symlink-ness as a kind now; the property bag is no longer consulted.
+            if (info is not { IsSymlink: true, SymlinkTarget: { Length: > 0 } raw })
                 return;
 
             // It is a symlink - discard any cached stream (it's from the pointer file,
@@ -131,12 +148,12 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
             ctx.Items[VfsContextKeys.SymlinkDepth]   = depth + 1;
             ctx.Items[VfsContextKeys.SymlinkFollowed] = true;
             // Symlink target is a string stored in Properties - wrap at the boundary.
-            ctx.Reroute(VfsPath.From(raw!));
+            ctx.Reroute(VfsPath.From(raw));
             // continue loop - check whether the target is also a symlink
         }
     }
 
     private bool IsSymlinkCapable(IVfsNode node)
-        => node.GetCapability<ISymlinkCapableNode>() is not null
+        => node.GetNodeCapability<ISymlinkCapableNode>(default) is not null
         || (_extraNodeTypes?.Contains(node.GetType()) == true);
 }

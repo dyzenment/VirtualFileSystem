@@ -34,7 +34,7 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 ///           o =&gt; o.UseSharePointDrive("b!AbC…").UseSharePointCachingCatalog());
 /// </code>
 /// </summary>
-public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalogMirror
+public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefreshableCache
 {
     private const long SmallUploadLimit = 4L * 1024 * 1024;        // Graph: single-PUT ceiling
     private const int  ChunkSize        = 320 * 1024 * 10;         // upload-session chunk (mult. of 320 KiB)
@@ -46,7 +46,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     private readonly string?        _sitePath;    // set when the drive id is resolved lazily from a site
     private readonly string?        _libraryName;
     private readonly string         _rootPath;    // normalized within-drive prefix; "" when none
-    private readonly CatalogMirror? _mirror;      // namespace cache; null = no caching
+    private readonly NodeCatalog? _mirror;      // namespace cache; null = no caching
     private readonly ILogger?       _logger;
     private readonly SemaphoreSlim  _driveIdGate = new(1, 1);
     private          string?        _driveId;     // known up-front, or resolved + cached on first use
@@ -62,27 +62,27 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
 
     // Caching is opt-in: UseSharePointCachingCatalog stashes a CatalogSelection. Present = mirror the
     // drive into the selected IVfsCatalog; absent = no caching.
-    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    private static NodeCatalog? ResolveMirror(VfsMountOptions options, IServiceProvider services)
     {
         var sel = options.Get<CatalogSelection>();
-        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+        return sel is null ? null : new NodeCatalog(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
     /// <summary>
     /// Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
     /// already attaches auth, targeting a drive by id.
     /// </summary>
-    public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, CatalogMirror? mirror = null)
+    public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, NodeCatalog? mirror = null)
         : this(graphClient, new SharePointOptions { DriveId = driveId, RootPath = rootPath }, mirror, null) { }
 
     /// <summary>Advanced / test seam: resolve the drive from a site address + library name.</summary>
     public static SharePointNode ForSite(
         HttpClient graphClient, string sitePath, string? libraryName = null,
-        string? rootPath = null, CatalogMirror? mirror = null, ILogger? logger = null)
+        string? rootPath = null, NodeCatalog? mirror = null, ILogger? logger = null)
         => new(graphClient, new SharePointOptions { SitePath = sitePath, LibraryName = libraryName, RootPath = rootPath },
                mirror, logger);
 
-    private SharePointNode(HttpClient http, SharePointOptions o, CatalogMirror? mirror, ILogger? logger)
+    private SharePointNode(HttpClient http, SharePointOptions o, NodeCatalog? mirror, ILogger? logger)
     {
         _http        = http ?? throw new ArgumentNullException(nameof(http));
         _driveId     = string.IsNullOrWhiteSpace(o.DriveId) ? null : o.DriveId;
@@ -380,7 +380,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         if (_mirror is not null)
         {
             await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
-                yield return CatalogMirror.ToNodeInfo(e);
+                yield return NodeCatalog.ToNodeInfo(e);
             yield break;
         }
 
@@ -457,10 +457,38 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
             : new SharePointChange(mountRel, SharePointChangeType.Updated, ToNodeInfo(item, VfsPath.From(mountRel)));
     }
 
+    // -- Content hashes --------------------------------------------------------
+
+    /// <summary>
+    /// Hashing is bound to the entry asked for, so the capability itself takes no path.
+    /// </summary>
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
+        => new SharePointEntryHashing(this, relativePath) as T;
+
+    // Serves SharePointEntryHashing.
+    internal async Task<string?> GetEntryHashAsync(
+        VfsPath path, string algorithm, bool withoutFetching, CancellationToken ct)
+    {
+        var key = VfsPropertyKeys.HashKey(algorithm);
+
+        // The delta feed carries Graph's hashes into the catalog with the rest of Properties, so a
+        // cached node answers from the row it already has - no request at all.
+        if (_mirror is not null && await _mirror.GetAsync(path, ct) is { } entry
+            && entry.Properties?.TryGetValue(key, out var mirrored) == true
+            && !string.IsNullOrEmpty(mirrored))
+            return mirrored;
+
+        // Otherwise it costs a round-trip per entry, which is what the caller asked to avoid.
+        if (withoutFetching) return null;
+
+        var info = await GetInfoAsync(new VfsNodeRequest(path), ct);
+        return info?.Properties.TryGetValue(key, out var fetched) == true ? fetched : null;
+    }
+
     // -- Catalog mirror sync ---------------------------------------------------
 
     /// <summary>
-    /// Force a delta sync of the mirror (<c>ICatalogMirror</c>). Listing already syncs, so this is for
+    /// Force a delta sync of the mirror (<c>IRefreshableCache</c>). Listing already syncs, so this is for
     /// callers that want an explicit refresh without listing.
     /// </summary>
     public Task RefreshAsync(CancellationToken ct = default) => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
@@ -576,6 +604,17 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         if (item.File?.MimeType is { } mt) props = props.Add("ContentType", mt);
         if (item.WebUrl is not null)       props = props.Add("WebUrl", item.WebUrl);
 
+        // Carry whatever hashes Graph reported. These travel through the delta feed into the catalog
+        // with everything else in Properties, so a mirrored listing can answer "what is this file's
+        // hash" without a round-trip per file.
+        if (item.File?.Hashes is { } h)
+        {
+            if (h.QuickXorHash is { Length: > 0 } qx) props = props.Add(VfsPropertyKeys.HashKey(VfsHashAlgorithms.QuickXor), qx);
+            if (h.Sha1Hash     is { Length: > 0 } s1) props = props.Add(VfsPropertyKeys.HashKey(VfsHashAlgorithms.Sha1),     s1);
+            if (h.Sha256Hash   is { Length: > 0 } s2) props = props.Add(VfsPropertyKeys.HashKey(VfsHashAlgorithms.Sha256),   s2);
+            if (h.Crc32Hash    is { Length: > 0 } c3) props = props.Add(VfsPropertyKeys.HashKey(VfsHashAlgorithms.Crc32),    c3);
+        }
+
         // The service-controlled timestamps stay reachable for callers who want "when did the
         // library last change", as opposed to "when was this file last modified".
         if (item.LastModifiedDateTime is { } serverModified)
@@ -597,4 +636,29 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
             Properties   = props,
         };
     }
+}
+
+/// <summary>
+/// A <see cref="SharePointNode"/>'s hashing bound to one entry - what
+/// <c>GetEntryCapability&lt;IContentHashing&gt;</c> hands back.
+/// </summary>
+internal sealed class SharePointEntryHashing(SharePointNode node, VfsPath path) : IContentHashing
+{
+    /// <summary>
+    /// SharePoint and OneDrive for Business report quickXorHash; personal OneDrive reports sha1/sha256
+    /// instead. Only quickXor is advertised because that is what this node is pointed at, though
+    /// <see cref="GetHashAsync"/> returns any algorithm Graph actually supplied.
+    /// </summary>
+    public IReadOnlyList<string> NativeAlgorithms { get; } = [VfsHashAlgorithms.QuickXor];
+
+    /// <summary>
+    /// Empty. Computing a hash here means downloading the whole item - the caller's decision to make,
+    /// not something to hide behind what looks like a metadata lookup.
+    /// </summary>
+    public IReadOnlyList<string> ComputableAlgorithms { get; } = [];
+
+    /// <inheritdoc/>
+    public Task<string?> GetHashAsync(
+        string algorithm, bool withoutFetching = false, CancellationToken ct = default)
+        => node.GetEntryHashAsync(path, algorithm, withoutFetching, ct);
 }

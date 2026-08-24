@@ -33,12 +33,12 @@ namespace Dytools.VirtualFileSystem.Nodes.S3;
 /// .MountSingleton&lt;S3Node&gt;("/reports", o => o.UseS3Bucket("my-bucket/reports/2026"))
 /// </code>
 /// </example>
-public sealed class S3Node : VfsNodeBase, ICatalogMirror
+public sealed class S3Node : VfsNodeBase, IRefreshableCache
 {
     private readonly IAmazonS3      _s3;
     private readonly string         _bucket;
     private readonly string         _prefix;   // normalized: no leading/trailing '/', "" when none
-    private readonly CatalogMirror? _mirror;   // namespace cache; null = no caching
+    private readonly NodeCatalog? _mirror;   // namespace cache; null = no caching
 
     /// <summary>Creates a node over the given S3 <paramref name="client"/> and bucket, optionally rooted at a key prefix.</summary>
     /// <param name="client">The S3 client to use. AWS SDK clients are thread-safe and intended to be shared as singletons.</param>
@@ -47,7 +47,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
     /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
     /// <exception cref="ArgumentNullException"><paramref name="client"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException"><paramref name="bucketName"/> is null or whitespace.</exception>
-    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, CatalogMirror? mirror = null)
+    public S3Node(IAmazonS3 client, string bucketName, string? keyPrefix = null, NodeCatalog? mirror = null)
     {
         _s3     = client ?? throw new ArgumentNullException(nameof(client));
         _bucket = string.IsNullOrWhiteSpace(bucketName)
@@ -64,10 +64,10 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
 
     // Caching is opt-in: UseS3CachingCatalog stashes a CatalogSelection. Present = mirror the bucket
     // into the selected IVfsCatalog; absent = no caching.
-    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    private static NodeCatalog? ResolveMirror(VfsMountOptions options, IServiceProvider services)
     {
         var sel = options.Get<CatalogSelection>();
-        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+        return sel is null ? null : new NodeCatalog(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
     /// <summary>Opens the S3 object for reading, or returns <c>null</c> if it does not exist.</summary>
@@ -175,7 +175,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         if (_mirror is not null)
         {
             await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
-                yield return CatalogMirror.ToNodeInfo(e);
+                yield return NodeCatalog.ToNodeInfo(e);
             yield break;
         }
 
@@ -263,7 +263,7 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
         }
     }
 
-    // -- Catalog mirror (ICatalogMirror) ---------------------------------------
+    // -- Catalog mirror (IRefreshableCache) ---------------------------------------
 
     /// <summary>Force a re-sync of the mirror against the bucket (picks up changes made outside this VFS).</summary>
     public Task RefreshAsync(CancellationToken ct = default) => ResyncAsync(ct);

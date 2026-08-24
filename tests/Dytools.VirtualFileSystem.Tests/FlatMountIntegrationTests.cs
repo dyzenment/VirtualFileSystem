@@ -34,7 +34,7 @@ public sealed class FlatMountIntegrationTests
         Assert.Equal("hello", await VfsFactory.ReadTextAsync(vfs, "/files/b.txt"));
 
         // The dedupe catalog is reachable as a capability, and both paths share one blob.
-        var catalog = vfs.GetCapability<IVfsCatalog>("/files");
+        var catalog = vfs.GetNodeCapability<IVfsCatalog>("/files");
         Assert.NotNull(catalog);
         var id = (await catalog!.GetAsync(VfsPath.From("a.txt")))!.ContentId!;
         Assert.Equal(2, await catalog.ReferenceCountAsync(id));

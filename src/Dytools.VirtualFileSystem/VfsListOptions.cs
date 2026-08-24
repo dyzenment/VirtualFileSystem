@@ -9,7 +9,7 @@ namespace Dytools.VirtualFileSystem;
 /// null options anywhere means "the defaults" (<see cref="Default"/>): the listed directory
 /// only, files and directories, hidden excluded, standard metadata.
 /// </summary>
-public sealed record VfsListOptions
+public sealed record VfsListOptions : VfsOperationOptions
 {
     /// <summary>The default options: the listed directory only, files and directories, hidden excluded, standard metadata.</summary>
     public static readonly VfsListOptions Default = new();
@@ -75,8 +75,12 @@ public enum VfsEntryKind
     Files       = 1,
     /// <summary>Directory entries only. Directories are virtual on flat stores.</summary>
     Directories = 2,
+    /// <summary>Symlink pointers only - the equivalent of <c>find -type l</c>.</summary>
+    Symlinks    = 4,
     /// <summary>Both files and directories.</summary>
     Both        = Files | Directories,
+    /// <summary>Everything, symlink pointers included.</summary>
+    All         = Files | Directories | Symlinks,
 }
 
 /// <summary>How much metadata a listing hydrates per entry.</summary>

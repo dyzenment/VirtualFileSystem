@@ -6,7 +6,7 @@ namespace Dytools.VirtualFileSystem.Tests;
 // The shared catalog-mirror plumbing used by the S3, Azure, and SharePoint caching nodes.
 public sealed class CatalogMirrorTests
 {
-    private static CatalogMirror NewMirror() => new(new JsonFileVfsCatalog(new InMemoryKvNode()));
+    private static NodeCatalog NewMirror() => new(new JsonFileVfsCatalog(new InMemoryKvNode()));
 
     private static VfsNodeInfo File(string path, long size = 1) => new()
     {
@@ -17,7 +17,7 @@ public sealed class CatalogMirrorTests
         ModifiedAt   = DateTimeOffset.UnixEpoch,
     };
 
-    private static async Task<List<string>> Children(CatalogMirror m, string path)
+    private static async Task<List<string>> Children(NodeCatalog m, string path)
     {
         var list = new List<string>();
         await foreach (var e in m.ListChildrenAsync(VfsPath.From(path))) list.Add(e.Path.ToString());
@@ -115,13 +115,13 @@ public sealed class CatalogMirrorTests
         // Contenders race over one linearizable catalog; the splitter must let AT MOST ONE win. A loser
         // may return false or, under sustained contention, throw TimeoutException - both count as "did
         // not win". Shrink the ADB backoff so contended rounds don't sleep the real 2-7s.
-        var (min, max) = (CatalogMirror.BackoffMinMs, CatalogMirror.BackoffMaxMs);
-        CatalogMirror.BackoffMinMs = CatalogMirror.BackoffMaxMs = 1;
+        var (min, max) = (NodeCatalog.BackoffMinMs, NodeCatalog.BackoffMaxMs);
+        NodeCatalog.BackoffMinMs = NodeCatalog.BackoffMaxMs = 1;
         try
         {
             for (var round = 0; round < 100; round++)
             {
-                var m = new CatalogMirror(new InMemoryVfsCatalog());
+                var m = new NodeCatalog(new InMemoryVfsCatalog());
                 var tasks = Enumerable.Range(0, 6).Select(i => Task.Run(async () =>
                 {
                     try   { return await m.SetIfNullStateAsync("lease", $"owner{i}"); }
@@ -132,7 +132,7 @@ public sealed class CatalogMirrorTests
                 Assert.True(winners <= 1, $"round {round}: {winners} winners");
             }
         }
-        finally { (CatalogMirror.BackoffMinMs, CatalogMirror.BackoffMaxMs) = (min, max); }
+        finally { (NodeCatalog.BackoffMinMs, NodeCatalog.BackoffMaxMs) = (min, max); }
     }
 
     [Fact]
@@ -140,7 +140,7 @@ public sealed class CatalogMirrorTests
     {
         var cts   = new CancellationTokenSource();
         var inner = new InMemoryVfsCatalog();
-        var m     = new CatalogMirror(new CancelAfterKeyWrite(inner, "lease", cts));
+        var m     = new NodeCatalog(new CancelAfterKeyWrite(inner, "lease", cts));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => m.SetIfNullStateAsync("lease", "A", cts.Token));
@@ -181,7 +181,7 @@ public sealed class CatalogMirrorTests
             Properties = new Dictionary<string, string?> { ["ETag"] = "e1" },
         };
 
-        var info = CatalogMirror.ToNodeInfo(entry);
+        var info = NodeCatalog.ToNodeInfo(entry);
         Assert.True(info.IsFile);
         Assert.Equal(42, info.SizeBytes);
         Assert.Equal("e1", info.Properties.GetString("ETag"));

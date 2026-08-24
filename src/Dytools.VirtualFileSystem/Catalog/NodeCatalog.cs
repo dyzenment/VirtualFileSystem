@@ -17,7 +17,7 @@ namespace Dytools.VirtualFileSystem.Catalog;
 /// splitter correct across processes sharing one catalog. Serving and write-through are catalog
 /// operations, which implementations already make safe for concurrent use.
 /// </remarks>
-public sealed class CatalogMirror
+public sealed class NodeCatalog
 {
     // Reserved directory holding one entry per state key. Hidden from listings.
     private const string StateDir = ".vfs-mirror-state";
@@ -25,7 +25,7 @@ public sealed class CatalogMirror
     private readonly IVfsCatalog _catalog;
 
     /// <summary>Creates a mirror backed by the given <paramref name="catalog"/>.</summary>
-    public CatalogMirror(IVfsCatalog catalog) => _catalog = catalog;
+    public NodeCatalog(IVfsCatalog catalog) => _catalog = catalog;
 
     /// <summary>The underlying catalog this mirror serves from and writes through to.</summary>
     public IVfsCatalog Catalog => _catalog;
@@ -52,6 +52,10 @@ public sealed class CatalogMirror
     // -- Sync state (cursor, seeded marker, sync lease) - one reserved entry per key ---------------
 
     /// <summary>Reads the value of the reserved sync-state entry <paramref name="key"/>, or null if unset.</summary>
+    /// <summary>The mirrored entry for a path, or null when it is not mirrored.</summary>
+    public ValueTask<CatalogEntry?> GetAsync(VfsPath path, CancellationToken ct = default)
+        => _catalog.GetAsync(path, ct);
+
     public async Task<string?> GetStateAsync(string key, CancellationToken ct = default)
         => (await _catalog.GetAsync(StatePath(key), ct))?.Properties.GetString("v");
 
@@ -200,6 +204,11 @@ public sealed class CatalogMirror
         CreatedAt    = e.CreatedAt,
         ModifiedAt   = e.ModifiedAt,
         AccessedAt   = e.AccessedAt,
+        // Symlink-ness rides in Properties rather than its own column, so a mirrored listing keeps it
+        // without a catalog schema change.
+        IsSymlink    = e.Properties?.ContainsKey(VfsPropertyKeys.SymlinkTarget) == true,
+        SymlinkTarget = e.Properties is null ? null
+            : e.Properties.TryGetValue(VfsPropertyKeys.SymlinkTarget, out var target) ? target : null,
         Properties   = e.Properties is null
             ? ImmutableDictionary<string, string?>.Empty
             : ImmutableDictionary.CreateRange(e.Properties),
@@ -214,6 +223,19 @@ public sealed class CatalogMirror
         ModifiedAt  = info.ModifiedAt ?? default,
         AccessedAt  = info.AccessedAt,
         ContentType = info.Properties.GetString("ContentType"),
-        Properties  = info.Properties.Count > 0 ? new Dictionary<string, string?>(info.Properties) : null,
+        Properties  = BuildProperties(info),
     };
+
+    // Persists the symlink target alongside the node's own extras, so ToNodeInfo can recover the kind.
+    private static Dictionary<string, string?>? BuildProperties(VfsNodeInfo info)
+    {
+        if (info.SymlinkTarget is null)
+            return info.Properties.Count > 0 ? new Dictionary<string, string?>(info.Properties) : null;
+
+        var props = new Dictionary<string, string?>(info.Properties)
+        {
+            [VfsPropertyKeys.SymlinkTarget] = info.SymlinkTarget,
+        };
+        return props;
+    }
 }

@@ -115,8 +115,8 @@ internal sealed class VfsPipeline
     public Task<Stream> ExecuteWriteAsync(VfsContext ctx, VfsWriteOptions options, CancellationToken ct)
     {
         // Options.WriteMode is kept in step so middleware reading the packed flags still sees the mode.
-        ctx.Options      = ctx.Options.WithWriteMode(options.Mode);
-        ctx.WriteOptions = options;
+        ctx.Options   = ctx.Options.WithWriteMode(options.Mode);
+        ctx.Operation = options;
         return _writeChain(ctx, ct);
     }
 
@@ -132,15 +132,21 @@ internal sealed class VfsPipeline
     public Task ExecuteRenameAsync(VfsContext ctx, string newName, CancellationToken ct)
         => _renameChain(ctx, newName, ct);
 
-    public Task<bool> ExecuteExistsAsync(VfsContext ctx, CancellationToken ct)
-        => _existsChain(ctx, ct);
+    public Task<bool> ExecuteExistsAsync(VfsContext ctx, VfsMetadataOptions options, CancellationToken ct)
+    {
+        ctx.Operation = options;
+        return _existsChain(ctx, ct);
+    }
 
-    public Task<VfsNodeInfo?> ExecuteGetInfoAsync(VfsContext ctx, CancellationToken ct)
-        => _getInfoChain(ctx, ct);
+    public Task<VfsNodeInfo?> ExecuteGetInfoAsync(VfsContext ctx, VfsMetadataOptions options, CancellationToken ct)
+    {
+        ctx.Operation = options;
+        return _getInfoChain(ctx, ct);
+    }
 
     public IAsyncEnumerable<VfsNodeInfo> ExecuteListAsync(VfsContext ctx, VfsListOptions options, CancellationToken ct)
     {
-        ctx.ListOptions = options;
+        ctx.Operation = options;
         return _listChain(ctx, ct);
     }
 

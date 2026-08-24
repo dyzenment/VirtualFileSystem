@@ -26,6 +26,7 @@ namespace Dytools.VirtualFileSystem;
 ///   _items:          8B  (SmallBag, lazy - null in common case)
 ///   _resolved:      16B  (VfsPath)
 ///   MountPoint:     16B  (VfsPath)
+///   Operation:       8B  (options for the running call, null when it has none)
 ///   Options:         8B  (VfsCallOptions, long-backed)
 /// </summary>
 public sealed class VfsContext
@@ -79,17 +80,24 @@ public sealed class VfsContext
     public VfsCallOptions Options { get; internal set; }
 
     /// <summary>
-    /// Directory-listing options for a List call (recursion, search pattern, kind, etc.).
-    /// Set by <c>VfsPipeline</c> before the list chain runs; middleware may read or rewrite it
-    /// (e.g. force IncludeHidden = false, inject a scoping SearchPattern). Null outside a List.
+    /// Options for the operation currently running, or null when it has none. Set by <c>VfsPipeline</c>
+    /// before the chain runs; middleware may read or rewrite it.
+    /// <para>
+    /// One slot rather than one field per operation: only a single operation is ever in flight on a
+    /// context, so separate fields would spend eight bytes apiece holding nulls. Read it through the
+    /// typed accessors below, which are casts and cost no storage.
+    /// </para>
     /// </summary>
-    public VfsListOptions? ListOptions { get; internal set; }
+    public VfsOperationOptions? Operation { get; internal set; }
 
-    /// <summary>
-    /// Write options for a Write call (mode, requested timestamps). Set by <c>VfsPipeline</c> before the
-    /// write chain runs; middleware may read or rewrite it. Null outside a Write.
-    /// </summary>
-    public VfsWriteOptions? WriteOptions { get; internal set; }
+    /// <summary>Listing options when a List is running, else null.</summary>
+    public VfsListOptions? ListOptions => Operation as VfsListOptions;
+
+    /// <summary>Write options when a Write is running, else null.</summary>
+    public VfsWriteOptions? WriteOptions => Operation as VfsWriteOptions;
+
+    /// <summary>Metadata options when a GetInfo or Exists is running, else null.</summary>
+    public VfsMetadataOptions? MetadataOptions => Operation as VfsMetadataOptions;
 
     // Shared bag for within-call middleware communication.
     // Prefer typed extension methods (GetUser/SetUser) over raw access.

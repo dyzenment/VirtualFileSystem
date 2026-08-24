@@ -75,6 +75,21 @@ public static class VfsPropertyKeys
     /// <summary>As <see cref="RequestedModified"/>, for the creation time.</summary>
     public const string RequestedCreated = "vfs_created";
 
+    /// <summary>
+    /// Prefix for a content hash the backend reported, one key per algorithm - e.g.
+    /// <c>"Hash.quickxor"</c>, <c>"Hash.md5"</c>. Value: the hash as the backend expressed it.
+    /// <para>
+    /// Deliberately in <c>Properties</c> rather than a field: a backend may report several algorithms
+    /// or none, the set differs per backend, and <c>Properties</c> already round-trips through a
+    /// catalog - so a mirrored listing keeps the hashes without any schema change. Distinct from
+    /// <c>CatalogEntry.Hash</c>, which is a dedupe node's content identity, not a reported value.
+    /// </para>
+    /// </summary>
+    public const string HashPrefix = "Hash.";
+
+    /// <summary>The <see cref="HashPrefix"/> property key for a given algorithm name.</summary>
+    public static string HashKey(string algorithm) => HashPrefix + algorithm;
+
     // Example node-specific keys for documentation purposes:
     // "ETag"         - HTTP entity tag (S3, REST nodes)
     // "ContentType"  - MIME type (S3, HTTP nodes)

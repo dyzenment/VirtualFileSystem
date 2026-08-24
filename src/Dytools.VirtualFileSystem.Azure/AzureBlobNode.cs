@@ -35,12 +35,12 @@ namespace Dytools.VirtualFileSystem.Nodes.Azure;
 /// under every auth mode.
 /// </para>
 /// </summary>
-public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
+public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
 {
     private readonly BlobServiceClient?   _service;    // account-wide mode
     private readonly BlobContainerClient? _container;  // fixed-container mode
     private readonly string               _prefix;     // fixed mode only; normalized, no leading/trailing '/'
-    private readonly CatalogMirror?       _mirror;     // namespace cache; null = no caching
+    private readonly NodeCatalog?       _mirror;     // namespace cache; null = no caching
 
     private bool AccountWide => _container is null;
 
@@ -49,7 +49,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
     /// <param name="pathPrefix">Optional path prefix the mount is rooted at; leading/trailing slashes are trimmed.</param>
     /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
     /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-    public AzureBlobNode(BlobContainerClient container, string? pathPrefix = null, CatalogMirror? mirror = null)
+    public AzureBlobNode(BlobContainerClient container, string? pathPrefix = null, NodeCatalog? mirror = null)
     {
         _container = container ?? throw new ArgumentNullException(nameof(container));
         _prefix    = pathPrefix?.Trim('/') ?? "";
@@ -60,7 +60,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
     /// <param name="service">The blob service client to mount.</param>
     /// <param name="mirror">Optional namespace cache; <c>null</c> disables caching.</param>
     /// <exception cref="ArgumentNullException"><paramref name="service"/> is <c>null</c>.</exception>
-    public AzureBlobNode(BlobServiceClient service, CatalogMirror? mirror = null)
+    public AzureBlobNode(BlobServiceClient service, NodeCatalog? mirror = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _prefix  = "";
@@ -89,10 +89,10 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
 
     // Caching is opt-in: UseAzureCachingCatalog stashes a CatalogSelection. Present = mirror the
     // container/account into the selected IVfsCatalog; absent = no caching.
-    private static CatalogMirror? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    private static NodeCatalog? ResolveMirror(VfsMountOptions options, IServiceProvider services)
     {
         var sel = options.Get<CatalogSelection>();
-        return sel is null ? null : new CatalogMirror(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+        return sel is null ? null : new NodeCatalog(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
     }
 
     /// <summary>Opens the blob for reading, or returns <c>null</c> if it does not exist (or the path is not a blob).</summary>
@@ -263,7 +263,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         if (_mirror is not null)
         {
             await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
-                yield return CatalogMirror.ToNodeInfo(e);
+                yield return NodeCatalog.ToNodeInfo(e);
             yield break;
         }
 
@@ -360,7 +360,7 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
         }
     }
 
-    // -- Catalog mirror (ICatalogMirror) ---------------------------------------
+    // -- Catalog mirror (IRefreshableCache) ---------------------------------------
 
     /// <summary>Force a re-sync of the mirror against the store (picks up changes made outside this VFS).</summary>
     public Task RefreshAsync(CancellationToken ct = default) => ResyncAsync(ct);

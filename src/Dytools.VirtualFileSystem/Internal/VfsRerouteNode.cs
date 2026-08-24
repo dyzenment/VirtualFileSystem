@@ -56,10 +56,18 @@ internal sealed class VfsRerouteNode : VfsNodeBase
     protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest request, CancellationToken ct)
         => ListAsync(request, VfsListOptions.Default, ct);
 
-    public override T? GetCapability<T>() where T : class
+    // Forwards both kinds on to the target, translating the path the same way every other operation
+    // does - the capability belongs to the node behind the reroute, not to this one.
+    public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
     {
-        var (n, _) = Target(new VfsNodeRequest(default));
-        return n.GetCapability<T>();
+        var (n, r) = Target(new VfsNodeRequest(relativePath));
+        return n.GetEntryCapability<T>(r.Path);
+    }
+
+    public override T? GetNodeCapability<T>(VfsPath mountPoint) where T : class
+    {
+        var (n, r) = Target(new VfsNodeRequest(default));
+        return n.GetNodeCapability<T>(r.Mount);
     }
 
     // -- Path translation ------------------------------------------------------

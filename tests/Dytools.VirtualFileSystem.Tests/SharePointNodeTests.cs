@@ -115,7 +115,7 @@ public sealed class SharePointNodeTests
             "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=C1"}
             """;
         var handler = new StubHandler(_ => (HttpStatusCode.OK, delta));
-        var mirror  = new CatalogMirror(new JsonFileVfsCatalog(new InMemoryKvNode()));
+        var mirror  = new NodeCatalog(new JsonFileVfsCatalog(new InMemoryKvNode()));
         var node    = new SharePointNode(
             new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", null, mirror);
 
@@ -151,7 +151,7 @@ public sealed class SharePointNodeTests
             """;
         var handler = new StubHandler(req =>
             (HttpStatusCode.OK, req.RequestUri!.ToString().Contains("token=P2") ? page2 : page1));
-        var mirror  = new CatalogMirror(new JsonFileVfsCatalog(new InMemoryKvNode()));
+        var mirror  = new NodeCatalog(new JsonFileVfsCatalog(new InMemoryKvNode()));
         var node    = new SharePointNode(
             new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", null, mirror);
 

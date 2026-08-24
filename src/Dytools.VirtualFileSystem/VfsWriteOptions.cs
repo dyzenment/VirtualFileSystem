@@ -16,7 +16,7 @@ namespace Dytools.VirtualFileSystem;
 /// A node honours what its backend supports and ignores the rest - check
 /// <see cref="VfsEntryInfo.ModifiedAt"/> after the write if it has to be exact.
 /// </remarks>
-public sealed record VfsWriteOptions
+public sealed record VfsWriteOptions : VfsOperationOptions
 {
     /// <summary>The defaults: <see cref="VfsWriteMode.Create"/>, no timestamps requested.</summary>
     public static readonly VfsWriteOptions Default = new();

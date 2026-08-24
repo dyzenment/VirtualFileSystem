@@ -13,7 +13,7 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 /// <see cref="SharePointChangeType.Deleted"/> with a null <see cref="SharePointChange.Info"/>.
 /// </para>
 /// </summary>
-public interface ISharePointChangeFeed
+public interface ISharePointChangeFeed : INodeCapability
 {
     /// <summary>
     /// Fetches the changes since <paramref name="cursor"/> (null for a fresh full delta).

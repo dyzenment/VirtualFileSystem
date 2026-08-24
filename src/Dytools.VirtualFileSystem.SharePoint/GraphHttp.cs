@@ -85,7 +85,21 @@ internal sealed class DriveItem
     [JsonPropertyName("root")] public object? Root { get; set; }   // present only on the drive root
 }
 
-internal sealed class FileFacet       { public string? MimeType { get; set; } }
+internal sealed class FileFacet
+{
+    public string?      MimeType { get; set; }
+    public HashesFacet? Hashes   { get; set; }
+}
+
+// Graph reports content hashes on the file facet. SharePoint and OneDrive for Business return
+// quickXorHash only; personal OneDrive returns sha1/sha256 instead. Any of them may be absent.
+internal sealed class HashesFacet
+{
+    public string? QuickXorHash { get; set; }
+    public string? Sha1Hash     { get; set; }
+    public string? Sha256Hash   { get; set; }
+    public string? Crc32Hash    { get; set; }
+}
 
 // The client-supplied timestamps of the file as it existed on its originating filesystem.
 // Distinct from the driveItem's own created/lastModified, which are service-controlled and move

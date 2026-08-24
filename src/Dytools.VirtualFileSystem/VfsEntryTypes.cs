@@ -45,6 +45,24 @@ public sealed record VfsNodeInfo
     /// <summary>True when the entry is flagged hidden by the backend.</summary>
     public          bool   IsHidden     { get; init; }
 
+    /// <summary>
+    /// True when this entry is a symlink pointer rather than the thing it points at.
+    /// <para>
+    /// A kind, alongside <see cref="IsFile"/> and <see cref="IsDirectory"/>, and reported by the node
+    /// the same way - so it survives a listing at any detail level, where a value tucked into
+    /// <see cref="Properties"/> would not. This is what <c>d_type</c> carries on POSIX and what the
+    /// reparse-point attribute carries on Windows: the enumeration says what each entry is, and
+    /// following it is a separate act.
+    /// </para>
+    /// </summary>
+    public          bool   IsSymlink    { get; init; }
+
+    /// <summary>
+    /// Where a symlink points, or null when this entry is not one. The consumer-facing
+    /// <c>readlink</c> - without it a caller can tell an entry is a link but never what it targets.
+    /// </summary>
+    public          string? SymlinkTarget { get; init; }
+
     /// <summary>Creation time, or null when the node cannot provide it (e.g. S3 has no CreatedAt).</summary>
     public DateTimeOffset? CreatedAt  { get; init; }
     /// <summary>Last-modified time, or null when the node cannot provide it.</summary>
@@ -90,14 +108,27 @@ public sealed record VfsEntryInfo
     public bool IsAliased { get; init; }
 
     /// <summary>
-    /// True when <c>SymlinkMiddleware</c> followed a node-level symlink pointer file.
-    /// The node stored <c>VfsPropertyKeys.SymlinkTarget</c> in its <see cref="VfsNodeInfo.Properties"/>
-    /// and the context was rerouted to the target path before reaching the node.
-    /// Set by VFS core; never by a node.
+    /// True when this entry is a symlink pointer rather than the thing it points at - reported by the
+    /// node, so it is present in listings as well as lookups.
+    /// <para>
+    /// A followed <c>GetInfoAsync</c> describes the <em>target</em>, and a target is not itself a
+    /// link, so this reads false there while <see cref="FollowedSymlink"/> reads true. Ask with
+    /// <see cref="VfsMetadataOptions.NoFollow"/> to describe the link instead.
+    /// </para>
     /// OS-level symlinks (NTFS reparse points, Unix symlinks) appear in
     /// <c>Properties[VfsPropertyKeys.PhysicalSymlink]</c> if the node surfaces them.
     /// </summary>
     public bool IsSymlink { get; init; }
+
+    /// <summary>Where a symlink points, or null when this entry is not one.</summary>
+    public string? SymlinkTarget { get; init; }
+
+    /// <summary>
+    /// True when <c>SymlinkMiddleware</c> followed a symlink to reach this result - so what is
+    /// described is the target, not the path that was asked for. A routing fact, set by VFS core and
+    /// never by a node. Listings never follow, so this is always false there.
+    /// </summary>
+    public bool FollowedSymlink { get; init; }
 
     /// <summary>Creation time, or null when unavailable.</summary>
     public DateTimeOffset? CreatedAt  { get; init; }

@@ -92,12 +92,19 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
     // -- Metadata --------------------------------------------------------------
 
     public Task<bool> ExistsAsync(string path, CancellationToken ct = default)
-        => _pipeline.ExecuteExistsAsync(Ctx(path), ct);
+        => ExistsAsync(path, null, ct);
 
-    public async Task<VfsEntryInfo?> GetInfoAsync(string path, CancellationToken ct = default)
+    public Task<bool> ExistsAsync(string path, VfsMetadataOptions? options, CancellationToken ct = default)
+        => _pipeline.ExecuteExistsAsync(Ctx(path), options ?? VfsMetadataOptions.Default, ct);
+
+    public Task<VfsEntryInfo?> GetInfoAsync(string path, CancellationToken ct = default)
+        => GetInfoAsync(path, null, ct);
+
+    public async Task<VfsEntryInfo?> GetInfoAsync(
+        string path, VfsMetadataOptions? options, CancellationToken ct = default)
     {
         var ctx  = Ctx(path);
-        var info = await _pipeline.ExecuteGetInfoAsync(ctx, ct);
+        var info = await _pipeline.ExecuteGetInfoAsync(ctx, options ?? VfsMetadataOptions.Default, ct);
         return info is null ? null : Enrich(info, ctx);
     }
 
@@ -119,8 +126,21 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         string path, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var ctx = Ctx(path);
+
+        // Ask once whether anything below this directory could route a child elsewhere. Almost always
+        // nothing does, and then every entry belongs to the mount already resolved for the directory -
+        // so re-resolving each one would be a full alias scan and mount scan per entry to arrive back
+        // at the answer in hand. Only when something can shadow is the per-entry work worth doing.
+        var mayShadow = ActiveRegistry.HasShadowingUnder(ctx.Path, ctx.ResolvedPath);
+
         await foreach (var nodeInfo in _pipeline.ExecuteListAsync(ctx, options, ct))
         {
+            if (!mayShadow)
+            {
+                yield return Enrich(nodeInfo, ctx.MountPoint);
+                continue;
+            }
+
             var childCtx = new VfsContext(
                 VfsPath.From(ctx.MountPoint, nodeInfo.RelativePath),
                 ActiveRegistry, _ambient);
@@ -130,8 +150,17 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
 
     // -- Consumer capability query ---------------------------------------------
 
-    public T? GetCapability<T>(string path) where T : class
-        => Ctx(path).ResolvedNode.GetCapability<T>();
+    public T? GetEntryCapability<T>(string path) where T : class, IEntryCapability
+    {
+        var ctx = Ctx(path);
+        return ctx.ResolvedNode.GetEntryCapability<T>(ctx.BuildNodeRequest().Path);
+    }
+
+    public T? GetNodeCapability<T>(string path) where T : class, INodeCapability
+    {
+        var ctx = Ctx(path);
+        return ctx.ResolvedNode.GetNodeCapability<T>(ctx.MountPoint);
+    }
 
     // -- Internals -------------------------------------------------------------
 
@@ -146,9 +175,20 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
     // The node's RelativePath gives us correct storage casing.
     // IsAliased and IsSymlink are VFS-layer facts - nodes never set them.
     private static VfsEntryInfo Enrich(VfsNodeInfo info, VfsContext ctx)
+        => Enrich(info, ctx.MountPoint,
+                  ctx.RawItems?.ContainsKey(VfsContextKeys.AliasFollowed)   == true,
+                  ctx.RawItems?.ContainsKey(VfsContextKeys.SymlinkFollowed) == true);
+
+    // Overload for listing entries that cannot be shadowed: the mount is the directory's own, and
+    // neither flag can be set, because nothing was re-routed to reach the entry.
+    private static VfsEntryInfo Enrich(VfsNodeInfo info, VfsPath mountPoint)
+        => Enrich(info, mountPoint, aliasFollowed: false, symlinkFollowed: false);
+
+    private static VfsEntryInfo Enrich(
+        VfsNodeInfo info, VfsPath mountPoint, bool aliasFollowed, bool symlinkFollowed)
     {
         // Build canonical VFS path: mount + "/" + node-relative (correct casing).
-        var fullPath  = VfsPath.From(ctx.MountPoint, info.RelativePath);
+        var fullPath  = VfsPath.From(mountPoint, info.RelativePath);
         var vfsPath   = fullPath.ToString();
 
         var name = info.RelativePath.GetName();
@@ -160,8 +200,10 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
             IsFile      = info.IsFile,
             IsDirectory = info.IsDirectory,
             IsHidden    = info.IsHidden,
-            IsAliased   = ctx.RawItems?.ContainsKey(VfsContextKeys.AliasFollowed)  == true,  // alias store was traversed
-            IsSymlink   = ctx.RawItems?.ContainsKey(VfsContextKeys.SymlinkFollowed) == true,  // node-level symlink was followed
+            IsAliased       = aliasFollowed,          // alias store was traversed
+            IsSymlink       = info.IsSymlink,         // node-reported kind
+            SymlinkTarget   = info.SymlinkTarget,
+            FollowedSymlink = symlinkFollowed,        // a symlink was followed to get here
             CreatedAt   = info.CreatedAt,
             ModifiedAt  = info.ModifiedAt,
             AccessedAt  = info.AccessedAt,

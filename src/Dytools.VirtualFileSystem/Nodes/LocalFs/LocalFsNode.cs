@@ -219,15 +219,22 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 
     private VfsNodeInfo BuildInfoFromEntry(ref FileSystemEntry entry)
     {
-        var props = ImmutableDictionary<string, string?>.Empty;
-        if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
-            props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
+        // An OS symlink or junction is a reparse point. Report it as the kind it is, so a listing says
+        // so the way readdir's DT_LNK and Windows' reparse attribute both do, and keep the legacy
+        // property for anyone already reading it.
+        var isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
+        var props  = ImmutableDictionary<string, string?>.Empty;
+        if (isLink) props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
+
+        var target = isLink ? SafeLinkTarget(entry.ToFullPath()) : null;
 
         return new VfsNodeInfo
         {
             RelativePath = BuildRelativePath(entry.ToFullPath()),
             IsFile       = !entry.IsDirectory,
             IsDirectory  = entry.IsDirectory,
+            IsSymlink    = isLink,
+            SymlinkTarget = target,
             IsHidden     = (entry.Attributes & FileAttributes.Hidden) != 0,
             SizeBytes    = entry.IsDirectory ? null : entry.Length,
             CreatedAt    = entry.CreationTimeUtc,
@@ -278,16 +285,18 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 
         if (File.Exists(physical))
         {
-            var fi    = new FileInfo(physical);
-            var props = ImmutableDictionary<string, string?>.Empty;
-            if ((fi.Attributes & FileAttributes.ReparsePoint) != 0)
-                props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
+            var fi     = new FileInfo(physical);
+            var isLink = (fi.Attributes & FileAttributes.ReparsePoint) != 0;
+            var props  = ImmutableDictionary<string, string?>.Empty;
+            if (isLink) props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
 
             return new VfsNodeInfo
             {
                 RelativePath = BuildRelativePath(fi.FullName),
                 IsFile       = true,
                 IsDirectory  = false,
+                IsSymlink    = isLink,
+                SymlinkTarget = isLink ? SafeLinkTarget(physical) : null,
                 IsHidden     = (fi.Attributes & FileAttributes.Hidden) != 0,
                 SizeBytes    = fi.Length,
                 CreatedAt    = fi.CreationTimeUtc,
@@ -340,5 +349,14 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     {
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+    }
+
+    // The OS link target, or null when it cannot be read. Best-effort: a broken or inaccessible link
+    // must still list, and reporting it as a link with an unknown target beats failing the listing.
+    private static string? SafeLinkTarget(string physicalPath)
+    {
+        try { return File.ResolveLinkTarget(physicalPath, returnFinalTarget: false)?.FullName; }
+        catch (IOException)                   { return null; }
+        catch (UnauthorizedAccessException)   { return null; }
     }
 }
