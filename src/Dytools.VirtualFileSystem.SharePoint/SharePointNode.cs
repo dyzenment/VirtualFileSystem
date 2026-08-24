@@ -189,44 +189,81 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
     /// cannot be appended to and must be rewritten whole.
     /// </exception>
     public override Task<Stream> OpenWriteAsync(
-        VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+        VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
-        if (mode == VfsWriteMode.Append)
+        options ??= VfsWriteOptions.Default;
+
+        if (options.Mode == VfsWriteMode.Append)
             throw new NotSupportedException(
                 "SharePoint items cannot be appended to; rewrite the whole item instead.");
-        return Task.FromResult<Stream>(new SharePointUploadStream(this, DrivePath(Rel(request)), mode));
+        return Task.FromResult<Stream>(new SharePointUploadStream(this, DrivePath(Rel(request)), options));
+    }
+
+    // Graph accepts full ISO 8601; the round-trip format on a UTC DateTime gives exactly that.
+    private static string GraphTime(DateTimeOffset value) => value.UtcDateTime.ToString("O");
+
+    // The fileSystemInfo facet for a write, or null when no timestamps were requested. This is the
+    // client-supplied facet, not the driveItem's own service-controlled timestamps - see ToNodeInfo.
+    private static Dictionary<string, string>? FileSystemInfoBody(VfsWriteOptions options)
+    {
+        if (options.ModifiedAt is null && options.CreatedAt is null) return null;
+
+        var facet = new Dictionary<string, string>();
+        if (options.ModifiedAt is { } m) facet["lastModifiedDateTime"] = GraphTime(m);
+        if (options.CreatedAt  is { } c) facet["createdDateTime"]      = GraphTime(c);
+        return facet;
     }
 
     // Called by SharePointUploadStream on close: pick single-PUT vs chunked upload session, then
     // fold the resulting item into the catalog.
-    internal async Task CommitUploadAsync(string drivePath, FileStream temp, VfsWriteMode mode)
+    internal async Task CommitUploadAsync(string drivePath, FileStream temp, VfsWriteOptions options)
     {
         await EnsureDriveIdAsync(CancellationToken.None);
         await temp.FlushAsync();
         temp.Position = 0;
-        var conflict = mode == VfsWriteMode.CreateNew ? "fail" : "replace";
+        var conflict = options.Mode == VfsWriteMode.CreateNew ? "fail" : "replace";
 
         var item = temp.Length < SmallUploadLimit
-            ? await UploadSmallAsync(drivePath, temp, conflict)
-            : await UploadLargeAsync(drivePath, temp, conflict);
+            ? await UploadSmallAsync(drivePath, temp, conflict, options)
+            : await UploadLargeAsync(drivePath, temp, conflict, options);
 
         if (_mirror is not null && item is not null && StripRoot(drivePath) is { } mountRel)
             await _mirror.UpsertAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None);
     }
 
-    private async Task<DriveItem?> UploadSmallAsync(string drivePath, Stream content, string conflict)
+    private async Task<DriveItem?> UploadSmallAsync(
+        string drivePath, Stream content, string conflict, VfsWriteOptions options)
     {
         var url  = ItemUrl(drivePath, $"/content?@microsoft.graph.conflictBehavior={conflict}");
         var resp = await _http.PutAsync(url, new StreamContent(content));
         if (conflict == "fail" && resp.StatusCode == HttpStatusCode.Conflict)
             throw new IOException($"SharePoint item already exists: {drivePath}");
         resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
+        var item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
+
+        // A raw PUT to /content carries no metadata, so requested timestamps need a follow-up PATCH.
+        // Only paid for when the caller actually asked for them; the chunked path below gets it free.
+        if (FileSystemInfoBody(options) is { } facet)
+        {
+            var patch = new HttpRequestMessage(HttpMethod.Patch, ItemUrl(drivePath))
+            {
+                Content = JsonContent.Create(new { fileSystemInfo = facet }, options: Json),
+            };
+            using var patched = await _http.SendAsync(patch);
+            patched.EnsureSuccessStatusCode();
+            item = await patched.Content.ReadFromJsonAsync<DriveItem>(Json) ?? item;
+        }
+
+        return item;
     }
 
-    private async Task<DriveItem?> UploadLargeAsync(string drivePath, Stream content, string conflict)
+    private async Task<DriveItem?> UploadLargeAsync(
+        string drivePath, Stream content, string conflict, VfsWriteOptions options)
     {
-        var body    = new { item = new Dictionary<string, string> { ["@microsoft.graph.conflictBehavior"] = conflict } };
+        // The session's item body already travels with the request, so timestamps ride along free here.
+        var item0 = new Dictionary<string, object> { ["@microsoft.graph.conflictBehavior"] = conflict };
+        if (FileSystemInfoBody(options) is { } facet) item0["fileSystemInfo"] = facet;
+        var body    = new { item = item0 };
         var create  = await _http.PostAsJsonAsync(ItemUrl(drivePath, "/createUploadSession"), body, Json);
         create.EnsureSuccessStatusCode();
         var session = await create.Content.ReadFromJsonAsync<UploadSession>(Json);
@@ -539,14 +576,24 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, ICatalo
         if (item.File?.MimeType is { } mt) props = props.Add("ContentType", mt);
         if (item.WebUrl is not null)       props = props.Add("WebUrl", item.WebUrl);
 
+        // The service-controlled timestamps stay reachable for callers who want "when did the
+        // library last change", as opposed to "when was this file last modified".
+        if (item.LastModifiedDateTime is { } serverModified)
+            props = props.Add("ServerModified", serverModified.ToString("O"));
+        if (item.CreatedDateTime is { } serverCreated)
+            props = props.Add("ServerCreated", serverCreated.ToString("O"));
+
         return new VfsNodeInfo
         {
             RelativePath = relativePath,
             IsFile       = !isDir,
             IsDirectory  = isDir,
             SizeBytes    = isDir ? null : item.Size,
-            CreatedAt    = item.CreatedDateTime,
-            ModifiedAt   = item.LastModifiedDateTime,
+            // fileSystemInfo first: it is the file's own mtime, the direct analogue of every other
+            // backend's, and the only value that survives a round-trip through a write. Falls back to
+            // the service value for items that never carried one.
+            CreatedAt    = item.FileSystemInfo?.CreatedDateTime ?? item.CreatedDateTime,
+            ModifiedAt   = item.FileSystemInfo?.LastModifiedDateTime ?? item.LastModifiedDateTime,
             Properties   = props,
         };
     }

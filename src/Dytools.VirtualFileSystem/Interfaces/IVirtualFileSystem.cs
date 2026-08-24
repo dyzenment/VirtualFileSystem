@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Dytools.VirtualFileSystem;
 
 /// <summary>
@@ -27,8 +29,12 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <summary>Opens a readable stream for the entry, or null when it does not exist.</summary>
     Task<Stream?>   OpenReadAsync(string path, CancellationToken ct = default);
 
-    /// <summary>Opens a writable stream for the entry using the given <paramref name="mode"/>.</summary>
-    Task<Stream>    OpenWriteAsync(string path, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default);
+    /// <summary>
+    /// Opens a writable stream for the entry. A bare <see cref="VfsWriteMode"/> converts implicitly, so
+    /// <c>OpenWriteAsync(path, VfsWriteMode.Append)</c> still binds; pass full
+    /// <see cref="VfsWriteOptions"/> to also request timestamps on the written entry.
+    /// </summary>
+    Task<Stream>    OpenWriteAsync(string path, VfsWriteOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Copies the entry at <paramref name="src"/> to <paramref name="dst"/>.</summary>
     Task            CopyAsync(string src, string dst, CancellationToken ct = default);
@@ -71,8 +77,21 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// </summary>
     Task    SendAsync<T>(string path, T value, CancellationToken ct = default);
 
+    /// <summary>
+    /// As <see cref="SendAsync{T}(string,T,CancellationToken)"/>, with control over serialisation -
+    /// naming policy, converters, indentation. Pass the same options to
+    /// <see cref="RetrieveAsync{T}(string,JsonSerializerOptions,CancellationToken)"/> when reading back.
+    /// </summary>
+    Task    SendAsync<T>(string path, T value, JsonSerializerOptions jsonOptions, CancellationToken ct = default);
+
     /// <summary>Reads and deserialises the entry at <paramref name="path"/> into <typeparamref name="T"/>.</summary>
     Task<T?> RetrieveAsync<T>(string path, CancellationToken ct = default);
+
+    /// <summary>
+    /// As <see cref="RetrieveAsync{T}(string,CancellationToken)"/>, with control over deserialisation.
+    /// Must match the options the value was written with.
+    /// </summary>
+    Task<T?> RetrieveAsync<T>(string path, JsonSerializerOptions jsonOptions, CancellationToken ct = default);
 
     /// <summary>
     /// Resolves <paramref name="path"/> to its node, then calls <c>node.GetCapability&lt;T&gt;()</c>.

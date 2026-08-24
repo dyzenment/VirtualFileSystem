@@ -18,7 +18,7 @@ public abstract class VfsNodeBase : IVfsNode
     /// <summary>Opens the content at the request's path for reading, or returns <c>null</c> if it does not exist.</summary>
     public abstract Task<Stream?>       OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default);
     /// <summary>Opens (or creates) the content at the request's path for writing, honoring the given <paramref name="mode"/>.</summary>
-    public abstract Task<Stream>        OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default);
+    public abstract Task<Stream>        OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default);
     /// <summary>Deletes the file or directory at the request's path.</summary>
     public abstract Task                DeleteAsync(VfsNodeRequest request, CancellationToken ct = default);
     /// <summary>Returns metadata for the request's path, or <c>null</c> if it does not exist.</summary>

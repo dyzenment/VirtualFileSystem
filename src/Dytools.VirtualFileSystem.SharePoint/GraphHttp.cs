@@ -75,6 +75,7 @@ internal sealed class DriveItem
     public DateTimeOffset?  CreatedDateTime      { get; set; }
     public DateTimeOffset?  LastModifiedDateTime { get; set; }
     public string?          ETag                 { get; set; }
+    public FileSystemInfoFacet? FileSystemInfo   { get; set; }
     public string?          WebUrl               { get; set; }
     public FileFacet?       File                 { get; set; }
     public FolderFacet?     Folder               { get; set; }
@@ -85,6 +86,17 @@ internal sealed class DriveItem
 }
 
 internal sealed class FileFacet       { public string? MimeType { get; set; } }
+
+// The client-supplied timestamps of the file as it existed on its originating filesystem.
+// Distinct from the driveItem's own created/lastModified, which are service-controlled and move
+// for reasons unrelated to the bytes (a column edit, a check-in, a retention label). This facet
+// is the one a sync client writes to preserve a file's identity across the copy, and the one
+// that round-trips - so it is what the node reports as CreatedAt/ModifiedAt.
+internal sealed class FileSystemInfoFacet
+{
+    public DateTimeOffset? CreatedDateTime      { get; set; }
+    public DateTimeOffset? LastModifiedDateTime { get; set; }
+}
 internal sealed class FolderFacet     { public int?    ChildCount { get; set; } }
 internal sealed class DeletedFacet    { public string? State { get; set; } }
 internal sealed class ParentReference { public string? DriveId { get; set; } public string? Path { get; set; } }

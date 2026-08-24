@@ -102,7 +102,7 @@ public sealed class ListOptionsTests
         { await Task.CompletedTask; yield break; }
 
         public override Task<Stream?> OpenReadAsync(VfsNodeRequest r, CancellationToken ct = default) => Task.FromResult<Stream?>(null);
-        public override Task<Stream>  OpenWriteAsync(VfsNodeRequest r, VfsWriteMode m = VfsWriteMode.Create, CancellationToken ct = default) => throw new NotSupportedException();
+        public override Task<Stream>  OpenWriteAsync(VfsNodeRequest r, VfsWriteOptions? m = null, CancellationToken ct = default) => throw new NotSupportedException();
         public override Task          DeleteAsync(VfsNodeRequest r, CancellationToken ct = default) => Task.CompletedTask;
         public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest r, CancellationToken ct = default) => Task.FromResult<VfsNodeInfo?>(null);
     }

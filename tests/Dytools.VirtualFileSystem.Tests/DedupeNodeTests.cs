@@ -23,7 +23,7 @@ public sealed class DedupeNodeTests
             return Task.FromResult<Stream?>(_blobs.TryGetValue(key, out var b) ? new MemoryStream(b, false) : null);
         }
 
-        public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+        public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? mode = null, CancellationToken ct = default)
         {
             var key = new string(req.Path.PathSpan);
             return Task.FromResult<Stream>(new CommitMs(bytes => _blobs[key] = bytes));

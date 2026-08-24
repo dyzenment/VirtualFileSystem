@@ -292,7 +292,7 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog
         var tmp  = _path + ".tmp";
         var leaf = _path.Contains('/') ? _path[(_path.LastIndexOf('/') + 1)..] : _path;
 
-        await using (var w = await _store.OpenWriteAsync(new VfsNodeRequest(VfsPath.From(tmp)), VfsWriteMode.Create, ct))
+        await using (var w = await _store.OpenWriteAsync(new VfsNodeRequest(VfsPath.From(tmp)), VfsWriteOptions.Default, ct))
             await w.WriteAsync(bytes, ct);
 
         await _store.RenameAsync(new VfsNodeRequest(VfsPath.From(tmp)), leaf, ct);

@@ -95,8 +95,11 @@ public sealed class DedupeNode : VfsNodeBase
 
     /// <inheritdoc/>
     public override async Task<Stream> OpenWriteAsync(
-        VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+        VfsNodeRequest req, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsWriteOptions.Default;
+        var mode = options.Mode;
+
         var path     = req.Path;
         var existing = await _catalog.GetAsync(path, ct);
 

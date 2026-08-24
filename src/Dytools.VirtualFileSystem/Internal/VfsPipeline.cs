@@ -35,7 +35,8 @@ internal sealed class VfsPipeline
         // Write - mode is stored in ctx.Options before the chain runs
         {
             Func<VfsContext, CancellationToken, Task<Stream>> chain =
-                static (ctx, ct) => ctx.ResolvedNode.OpenWriteAsync(ctx.BuildNodeRequest(), ctx.Options.WriteMode, ct);
+                static (ctx, ct) => ctx.ResolvedNode.OpenWriteAsync(
+                    ctx.BuildNodeRequest(), ctx.WriteOptions ?? VfsWriteOptions.Default, ct);
             for (var i = mw.Count - 1; i >= 0; i--)
             { var m = mw[i]; var next = chain; chain = (ctx, ct) => m.InvokeWriteAsync(ctx, next, ct); }
             _writeChain = chain;
@@ -111,9 +112,11 @@ internal sealed class VfsPipeline
     public Task<Stream?> ExecuteReadAsync(VfsContext ctx, CancellationToken ct)
         => _readChain(ctx, ct);
 
-    public Task<Stream> ExecuteWriteAsync(VfsContext ctx, VfsWriteMode mode, CancellationToken ct)
+    public Task<Stream> ExecuteWriteAsync(VfsContext ctx, VfsWriteOptions options, CancellationToken ct)
     {
-        ctx.Options = ctx.Options.WithWriteMode(mode);
+        // Options.WriteMode is kept in step so middleware reading the packed flags still sees the mode.
+        ctx.Options      = ctx.Options.WithWriteMode(options.Mode);
+        ctx.WriteOptions = options;
         return _writeChain(ctx, ct);
     }
 
@@ -154,7 +157,7 @@ internal sealed class VfsPipeline
         }
         await using var r = await src.ResolvedNode.OpenReadAsync(src.BuildNodeRequest(), ct)
             ?? throw new FileNotFoundException($"VFS copy source not found: {src.Path}");
-        await using var w = await dst.ResolvedNode.OpenWriteAsync(dst.BuildNodeRequest(), VfsWriteMode.Create, ct);
+        await using var w = await dst.ResolvedNode.OpenWriteAsync(dst.BuildNodeRequest(), VfsWriteOptions.Default, ct);
         await r.CopyToAsync(w, ct);
     }
 

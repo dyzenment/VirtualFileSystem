@@ -10,7 +10,7 @@ public interface IVfsNode
     Task<Stream?>    OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default);
 
     /// <summary>Opens a writable stream for the request using the given <paramref name="mode"/>.</summary>
-    Task<Stream>     OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default);
+    Task<Stream>     OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Deletes the entry addressed by the request.</summary>
     Task             DeleteAsync(VfsNodeRequest request, CancellationToken ct = default);

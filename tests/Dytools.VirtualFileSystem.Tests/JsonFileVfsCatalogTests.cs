@@ -74,7 +74,7 @@ public sealed class JsonFileVfsCatalogTests
 
         public override Task<Stream?> OpenReadAsync(VfsNodeRequest r, CancellationToken ct = default)
             => _inner.OpenReadAsync(r, ct);
-        public override Task<Stream> OpenWriteAsync(VfsNodeRequest r, VfsWriteMode m = VfsWriteMode.Create, CancellationToken ct = default)
+        public override Task<Stream> OpenWriteAsync(VfsNodeRequest r, VfsWriteOptions? m = null, CancellationToken ct = default)
         { Writes++; return _inner.OpenWriteAsync(r, m, ct); }
         public override Task RenameAsync(VfsNodeRequest r, string newName, CancellationToken ct = default)
             => _inner.RenameAsync(r, newName, ct);

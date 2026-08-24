@@ -7,16 +7,16 @@ internal sealed class SharePointUploadStream : Stream
 {
     private readonly SharePointNode _node;
     private readonly string         _drivePath;
-    private readonly VfsWriteMode   _mode;
+    private readonly VfsWriteOptions _options;
     private readonly string         _tempPath;
     private readonly FileStream     _temp;
     private          bool           _committed;
 
-    public SharePointUploadStream(SharePointNode node, string drivePath, VfsWriteMode mode)
+    public SharePointUploadStream(SharePointNode node, string drivePath, VfsWriteOptions options)
     {
         _node      = node;
         _drivePath = drivePath;
-        _mode      = mode;
+        _options   = options;
         _tempPath  = Path.Combine(Path.GetTempPath(), "vfs-sp-" + Guid.NewGuid().ToString("N"));
         _temp      = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
                                     FileShare.None, bufferSize: 4096, useAsync: true);
@@ -57,7 +57,7 @@ internal sealed class SharePointUploadStream : Stream
         _committed = true;
         try
         {
-            await _node.CommitUploadAsync(_drivePath, _temp, _mode).ConfigureAwait(false);
+            await _node.CommitUploadAsync(_drivePath, _temp, _options).ConfigureAwait(false);
         }
         finally
         {

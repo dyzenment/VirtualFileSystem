@@ -29,8 +29,8 @@ internal sealed class VfsRerouteNode : VfsNodeBase
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest req, CancellationToken ct = default)
     { var (n, r) = Target(req); return n.OpenReadAsync(r, ct); }
 
-    public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
-    { var (n, r) = Target(req); return n.OpenWriteAsync(r, mode, ct); }
+    public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? options = null, CancellationToken ct = default)
+    { var (n, r) = Target(req); return n.OpenWriteAsync(r, options, ct); }
 
     public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
     { var (n, r) = Target(req); return n.DeleteAsync(r, ct); }

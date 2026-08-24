@@ -125,8 +125,11 @@ public sealed class AzureBlobNode : VfsNodeBase, ICatalogMirror
     /// <see cref="VfsWriteMode.CreateNew"/> and the blob already exists.
     /// </exception>
     public override async Task<Stream> OpenWriteAsync(
-        VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+        VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsWriteOptions.Default;
+        var mode = options.Mode;
+
         var (container, name) = Locate(Rel(request));
         if (container is null || name.Length == 0)
             throw new IOException("Cannot write to a container or the mount root - specify a blob path.");

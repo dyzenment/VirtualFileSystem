@@ -85,6 +85,12 @@ public sealed class VfsContext
     /// </summary>
     public VfsListOptions? ListOptions { get; internal set; }
 
+    /// <summary>
+    /// Write options for a Write call (mode, requested timestamps). Set by <c>VfsPipeline</c> before the
+    /// write chain runs; middleware may read or rewrite it. Null outside a Write.
+    /// </summary>
+    public VfsWriteOptions? WriteOptions { get; internal set; }
+
     // Shared bag for within-call middleware communication.
     // Prefer typed extension methods (GetUser/SetUser) over raw access.
     // Allocated lazily - most calls never touch it.

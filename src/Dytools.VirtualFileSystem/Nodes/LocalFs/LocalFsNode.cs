@@ -45,19 +45,68 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     }
 
     /// <inheritdoc/>
-    public override Task<Stream> OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+    public override Task<Stream> OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsWriteOptions.Default;
+
         var physical = Resolve(request);
         EnsureDirectory(physical);
-        var fileMode = mode switch
+        var fileMode = options.Mode switch
         {
             VfsWriteMode.Append    => FileMode.Append,
             VfsWriteMode.CreateNew => FileMode.CreateNew,
             _                      => FileMode.Create,
         };
-        Stream stream = new FileStream(physical, fileMode, FileAccess.Write,
-            FileShare.None, bufferSize: 4096, useAsync: true);
+
+        // Only pay for the stamping subclass when timestamps were actually asked for.
+        Stream stream = options.ModifiedAt is null && options.CreatedAt is null
+            ? new FileStream(physical, fileMode, FileAccess.Write,
+                FileShare.None, bufferSize: 4096, useAsync: true)
+            : new TimestampedFileStream(physical, fileMode, options);
+
         return Task.FromResult(stream);
+    }
+
+    // Applies the caller's requested timestamps once the handle is closed. Setting them while the
+    // stream is still open would be undone by the final flush, so it has to happen after the base
+    // dispose. Subclassing FileStream rather than wrapping it keeps every Stream member native.
+    private sealed class TimestampedFileStream(string path, FileMode mode, VfsWriteOptions options)
+        : FileStream(path, mode, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true)
+    {
+        private bool _stamped;
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) Stamp();
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await base.DisposeAsync().ConfigureAwait(false);
+            Stamp();
+        }
+
+        private void Stamp()
+        {
+            if (_stamped) return;
+            _stamped = true;
+            try
+            {
+                if (options.ModifiedAt is { } modified)
+                    File.SetLastWriteTimeUtc(path, modified.UtcDateTime);
+
+                // Linux has no settable birth time and the runtime throws rather than ignoring it.
+                if (options.CreatedAt is { } created && !OperatingSystem.IsLinux())
+                    File.SetCreationTimeUtc(path, created.UtcDateTime);
+            }
+            catch (Exception ex) when (ex is IOException
+                                          or UnauthorizedAccessException
+                                          or PlatformNotSupportedException)
+            {
+                // Best effort - the bytes are written and that is what the caller was promised.
+            }
+        }
     }
 
     /// <inheritdoc/>

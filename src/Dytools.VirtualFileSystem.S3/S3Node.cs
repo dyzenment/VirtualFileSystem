@@ -96,8 +96,11 @@ public sealed class S3Node : VfsNodeBase, ICatalogMirror
     /// <exception cref="NotSupportedException"><paramref name="mode"/> is <see cref="VfsWriteMode.Append"/> - S3 objects are immutable.</exception>
     /// <exception cref="IOException"><paramref name="mode"/> is <see cref="VfsWriteMode.CreateNew"/> and the object already exists.</exception>
     public override async Task<Stream> OpenWriteAsync(
-        VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+        VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsWriteOptions.Default;
+        var mode = options.Mode;
+
         if (mode == VfsWriteMode.Append)
             throw new NotSupportedException(
                 "Amazon S3 objects are immutable and cannot be appended to. Rewrite the whole object instead.");

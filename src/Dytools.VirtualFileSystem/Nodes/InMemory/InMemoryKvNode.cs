@@ -46,8 +46,12 @@ public sealed class InMemoryKvNode : VfsNodeBase
     }
 
     /// <inheritdoc/>
-    public override Task<Stream> OpenWriteAsync(VfsNodeRequest request, VfsWriteMode mode = VfsWriteMode.Create, CancellationToken ct = default)
+    public override Task<Stream> OpenWriteAsync(
+        VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsWriteOptions.Default;
+        var mode = options.Mode;
+
         var key = BuildKey(request.Path.PathSpan, request.Path.StreamSpan); // one string alloc for writes
 
         _lock.EnterWriteLock();
