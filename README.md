@@ -497,7 +497,10 @@ services.AddVfsJsonCatalog(sp => sp.NodeAt("/dev/cat-b"), serviceKey: "b");
 
 **Database-backed.** Implement `IVfsCatalog` over your DB (add a partition column and filter
 every query - including reference counts - by it to support `ForPartition`), register it
-(`Scoped` if it shares the request `DbContext`), and mount as above.
+(`Scoped` if it shares the request `DbContext`), and mount as above. If you also implement
+`IContentAddressedCatalog`, index `ContentId` alongside the partition: `ReferenceCountAsync` and
+`ListByContentIdAsync` both key on it, and the interface's default for the latter falls back to
+walking the whole namespace.
 
 ## Built-in providers
 
@@ -526,7 +529,10 @@ this library. All three support an optional **caching catalog** (each via its ow
 `UseS3CachingCatalog` / `UseAzureCachingCatalog` / `UseSharePointCachingCatalog`) that
 mirrors the backend's structure into an `IVfsCatalog` for fast local listings, refreshable via
 the `IRefreshableCache` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
-delta, while S3/Azure seed once and write through. See each package's README for setup.
+delta, while S3/Azure seed once and write through. SharePoint's mirror keys each row on the
+driveItem id (in `ContentId`) rather than on its path, because that is all a deletion reports and it
+is what survives a rename - so a caching SharePoint mount needs an `IContentAddressedCatalog`. See
+each package's README for setup.
 
 ## Writing a custom node
 
@@ -553,6 +559,87 @@ A backend that can list more efficiently may instead override the full
 `ListAsync(req, options, ct)` to push recursion or the search pattern down natively (as
 `LocalFsNode` does), and declare `RequiresFullScan` / `IsCaseSensitive` to tune the strict
 guard and the matcher. Overriding is optional - the base engine is always a correct fallback.
+
+### Mirroring a slow backend with `NodeCatalog`
+
+When a backend lists slowly or charges per request, a node can mirror its namespace locally and
+serve listings from that instead. `NodeCatalog` is the reusable plumbing for it - the same type
+behind `UseS3CachingCatalog`, `UseAzureCachingCatalog`, and `UseSharePointCachingCatalog`. It wraps
+an `IVfsCatalog`, serves listings, writes mutations through, and keeps small sync state (a cursor, a
+lease) in reserved rows hidden from listings. You decide *how* to refresh - a full re-list, or an
+incremental change feed - and *when*.
+
+Make it opt-in the way the built-ins do: your `UseMyCachingCatalog()` extension stashes a
+`CatalogSelection` in the mount options bag, and the node resolves it or runs uncached.
+
+```csharp
+public sealed class MyNode : VfsNodeBase, IRefreshableCache
+{
+    private readonly NodeCatalog? _mirror;   // null = caching not opted into
+
+    private static NodeCatalog? ResolveMirror(VfsMountOptions options, IServiceProvider services)
+    {
+        var sel = options.Get<CatalogSelection>();
+        return sel is null ? null : new NodeCatalog(CatalogResolver.Resolve(services, sel.ServiceKey, sel.Partition));
+    }
+
+    // Sync once per listing, then let the base engine drive recursion and filtering over the mirror.
+    public override async IAsyncEnumerable<VfsNodeInfo> ListAsync(
+        VfsNodeRequest req, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (_mirror is not null) await SyncAsync(ct);
+        await foreach (var info in base.ListAsync(req, options, ct)) yield return info;
+    }
+
+    // Single level: from the mirror when caching, straight from the backend otherwise.
+    protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
+        VfsNodeRequest req, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (_mirror is null) { /* …backend listing… */ yield break; }
+
+        await foreach (var e in _mirror.ListChildrenAsync(req.Path, ct))
+            yield return NodeCatalog.ToNodeInfo(e);
+    }
+
+    // IRefreshableCache: an explicit refresh for callers that want one without listing.
+    public Task RefreshAsync(CancellationToken ct = default)
+        => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
+}
+```
+
+Reads and mutations still go to the backend - the mirror is a namespace cache, not a source of
+truth. Write through on every mutation (`UpsertAsync` after a write, `RemoveAsync` after a delete,
+`MoveAsync` after a rename), and reconcile opportunistically: when a read or a `GetInfoAsync`
+returns 404 for something the mirror lists, remove that row before returning null. That self-heals
+drift the sync missed.
+
+| Member | Use |
+|---|---|
+| `UpsertAsync(info)` / `UpsertAsync(infos)` | write one row, or a whole page in a single persist |
+| `RemoveAsync(path)` / `RemoveAsync(paths)` | remove a row (a directory takes its subtree); bulk persists once |
+| `MoveAsync(from, to)` | re-key a path or subtree, no content touched |
+| `ListChildrenAsync(path)` | serve a listing, with the reserved state rows filtered out |
+| `GetAsync(path)` / `SetPropertyAsync(path, key, value)` | read a row / park one value on it (a computed hash) |
+| `TouchAccessedAsync(path, when)` | best-effort access time for backends that don't track it |
+| `GetStateAsync` / `SetStateAsync` / `ClearStateAsync` | node-scoped sync state - a cursor, a seeded marker |
+| `SetIfNullStateAsync(key, value)` | atomic claim; the basis of a cross-instance sync lease |
+| `ClearAsync()` | wipe every row (keeping state) ahead of a full rebuild |
+
+**Prefer bulk when seeding.** `UpsertAsync(IEnumerable<VfsNodeInfo>)` and
+`RemoveAsync(IEnumerable<VfsPath>)` persist once for the whole set; looping the single-item forms
+against `JsonFileVfsCatalog` rewrites the document per item and turns a seed into O(n²). Apply a
+change-feed page as one bulk write, then checkpoint its cursor with `SetStateAsync`, so a crash
+resumes from the last page rather than restarting.
+
+**Choose what the mirror is keyed on.** Rows are addressed by path, which is fine if your backend
+describes changes by path. It is the wrong key if the backend gives items a stable identity, and
+badly wrong if its change feed reports a deletion as *an id and nothing else* (Graph does) or
+reports a rename as an upsert at the new path without mentioning the old one (Graph does that too) -
+a path-keyed mirror silently accumulates entries for files that no longer exist. In that case
+publish the backend's id under `VfsPropertyKeys.ContentId` in your `VfsNodeInfo.Properties`;
+`NodeCatalog` lifts it into `CatalogEntry.ContentId`, the indexed column, and reconciling a deletion
+or a move becomes `IContentAddressedCatalog.ListByContentIdAsync`. Require that interface at mount
+time if you depend on it, as `SharePointNode` does.
 
 See [`samples/`](samples/Dytools.VirtualFileSystem.Sample/Program.cs) for a
 runnable demo covering aliases, node-level symlinks, and hard-link deduplication.

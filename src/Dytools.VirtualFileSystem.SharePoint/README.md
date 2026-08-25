@@ -143,6 +143,16 @@ or isolate several mounts within one shared catalog using
     o => o.UseSharePointDrive("b!XyZ…").UseSharePointCachingCatalog(partition: "hr", serviceKey: "db"))
 ```
 
+**The mirror is keyed by item id, not by path.** Each row stores the driveItem id in
+`CatalogEntry.ContentId`, so a caching mount requires a catalog implementing
+`IContentAddressedCatalog` (`JsonFileVfsCatalog` does) - it throws at mount time otherwise. That is
+what lets the sync apply the two things a path-keyed mirror cannot: a **deletion**, which arrives as
+a tombstone carrying an id and nothing else, and a **rename or move made outside the VFS**, which
+Graph reports as an upsert at the new path while never mentioning the old one. Both resolve through
+the id, so one item is always one row - folders included, which is how deleting a folder takes its
+whole subtree with it. Because the tombstone has no path, a rooted mount cannot filter drive-wide
+deletions before looking them up; an id it holds nothing for is simply a no-op.
+
 ## Delta change feed
 
 `GetNodeCapability<ISharePointChangeFeed>(path)` exposes Graph's `/delta` directly (the caching
@@ -155,12 +165,21 @@ var batch = await feed!.GetChangesAsync(savedCursor);   // savedCursor == null o
 
 foreach (var change in batch.Changes)
 {
-    // change.Path is relative to the mount; change.Type is Updated or Deleted;
+    // change.Id   is the driveItem id - stable across renames and moves, always present on a delete;
+    // change.Type is Updated or Deleted;
+    // change.Path is mount-relative, and NULL for a deletion (see below);
     // change.Info carries metadata for an upsert (null for a delete).
 }
 
 Persist(batch.Cursor);   // save AFTER applying, so a crash re-delivers rather than drops
 ```
+
+**Match deletions on `Id`, not `Path`.** Graph reports a deletion as a *tombstone*: a minimal object
+carrying the item id and a `deleted` facet, with no name and a `parentReference` that has no path.
+There is nothing to build a path from, so `change.Path` is null for a delete in the normal case -
+keep your own `id → path` mapping (as the caching catalog does) rather than expecting one. The same
+id is what makes a rename tractable: Graph reports it as an *upsert at the new path* and never
+mentions the old one, so anything keyed on paths alone silently keeps the old entry forever.
 
 ## Notes
 
@@ -170,8 +189,8 @@ Persist(batch.Cursor);   // save AFTER applying, so a crash re-delivers rather t
   4 MB upload in one request; larger files use a chunked upload session automatically.
 - `CopyAsync` uses the base stream fallback (Graph's native copy is asynchronous); `MoveAsync`
   and `RenameAsync` use native Graph operations.
-- Item names are case-insensitive. `ETag`, `ContentType`, and `WebUrl` surface in
-  `VfsNodeInfo.Properties`.
+- Item names are case-insensitive. `ETag`, `ContentType`, `WebUrl`, and `ContentId` (the driveItem
+  id) surface in `VfsNodeInfo.Properties`.
 - Throttling (`429` / `503`) is retried with `Retry-After` backoff on reads; a throttled write
   surfaces the error for you to retry.
 
