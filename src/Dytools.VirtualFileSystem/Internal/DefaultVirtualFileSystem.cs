@@ -87,7 +87,10 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         => _pipeline.ExecuteRenameAsync(Ctx(path), newName, ct);
 
     public Task DeleteAsync(string path, CancellationToken ct = default)
-        => _pipeline.ExecuteDeleteAsync(Ctx(path), ct);
+        => DeleteAsync(path, null, ct);
+
+    public Task DeleteAsync(string path, VfsDeleteOptions? options, CancellationToken ct = default)
+        => _pipeline.ExecuteDeleteAsync(Ctx(path), options ?? VfsDeleteOptions.Default, ct);
 
     // -- Metadata --------------------------------------------------------------
 

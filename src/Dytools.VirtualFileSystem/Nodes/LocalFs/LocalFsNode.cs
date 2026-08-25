@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.IO.Enumeration;
 using System.Runtime.CompilerServices;
 using Dytools.VirtualFileSystem;
+using Dytools.VirtualFileSystem.Nodes.LocalFs.Trash;
 
 namespace Dytools.VirtualFileSystem.Nodes.LocalFs;
 
@@ -27,6 +28,10 @@ namespace Dytools.VirtualFileSystem.Nodes.LocalFs;
 public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 {
     private readonly string _root = Path.GetFullPath(rootPath);
+
+    // The OS bin for the running platform. Swappable so tests can drive the delete paths without
+    // putting anything in the developer's real Trash.
+    internal ITrashProvider TrashProvider { get; init; } = TrashProviders.Current;
 
     /// <summary>
     /// Creates a node from mount options. Activated by
@@ -118,11 +123,38 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     }
 
     /// <inheritdoc/>
-    public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    public override Task DeleteAsync(
+        VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        options ??= VfsDeleteOptions.Default;
+
         var physical = Resolve(request);
-        if (File.Exists(physical))           File.Delete(physical);
-        else if (Directory.Exists(physical)) Directory.Delete(physical, recursive: true);
+        var isFile   = File.Exists(physical);
+        var isDir    = !isFile && Directory.Exists(physical);
+        if (!isFile && !isDir) return Task.CompletedTask;   // already gone
+
+        // Throws for a strict Recycle the volume cannot honour, rather than letting the shell quietly
+        // destroy what the caller asked to keep.
+        if (options.ResolveRecycle(TrashProvider.CanRecycle(physical), request.Path))
+        {
+            try
+            {
+                TrashProvider.Trash(physical);
+                return Task.CompletedTask;
+            }
+            catch (Exception ex) when (options.Disposition == VfsDeleteDisposition.RecycleIfAvailable
+                                       && ex is IOException
+                                           or UnauthorizedAccessException
+                                           or PlatformNotSupportedException)
+            {
+                // CanRecycle only vets the volume. A read-only mount, a bin over quota, or a trash
+                // directory we cannot create only surface here - and falling through to a permanent
+                // delete is exactly what RecycleIfAvailable asked for.
+            }
+        }
+
+        if (isFile) File.Delete(physical);
+        else        Directory.Delete(physical, options.Recursive);
         return Task.CompletedTask;
     }
 
@@ -362,9 +394,16 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
 
     // -- Content hashes --------------------------------------------------------
 
-    /// <summary>Hashing bound to the entry asked for.</summary>
+    /// <summary>Hashing and recycle-bin questions, each bound to the entry asked for.</summary>
     public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
-        => new LocalFsEntryHashing(this, relativePath) as T;
+        => typeof(T) == typeof(IRecycling)      ? new LocalFsRecycling(this, relativePath)      as T
+         : typeof(T) == typeof(IContentHashing) ? new LocalFsEntryHashing(this, relativePath)   as T
+         : null;
+
+    // Serves LocalFsRecycling. Resolving here rather than in the capability keeps the mount-root
+    // traversal guard on the one path that knows about it.
+    internal bool CanRecycle(VfsPath path)
+        => TrashProvider.CanRecycle(Resolve(new VfsNodeRequest(path)));
 
     // Serves LocalFsEntryHashing. Local disk is the one backend where computing is cheap enough to
     // just do, so there is nothing to report natively and nothing to refuse.
@@ -377,6 +416,21 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         await using (stream)
             return await VfsHashing.ComputeAsync(stream, algorithm, ct);
     }
+}
+
+/// <summary>
+/// A <see cref="LocalFsNode"/>'s recycle-bin availability, bound to one entry.
+/// </summary>
+/// <remarks>
+/// The answer is per-entry rather than per-node because a mount can span volumes: a directory tree
+/// with mount points under it, or on Windows a UNC path sitting next to a fixed disk, where one has a
+/// bin and the other does not.
+/// </remarks>
+internal sealed class LocalFsRecycling(LocalFsNode node, VfsPath path) : IRecycling
+{
+    /// <inheritdoc/>
+    public ValueTask<bool> CanRecycleAsync(CancellationToken ct = default)
+        => ValueTask.FromResult(node.CanRecycle(path));
 }
 
 /// <summary>

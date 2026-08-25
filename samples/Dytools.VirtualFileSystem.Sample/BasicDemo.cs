@@ -191,8 +191,8 @@ internal sealed class SymlinkAwareInMemoryNode : VfsNodeBase, ISymlinkCapableNod
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? mode = null, CancellationToken ct = default)
         => _inner.OpenWriteAsync(req, mode, ct);
 
-    public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
-        => _inner.DeleteAsync(req, ct);
+    public override Task DeleteAsync(VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
+        => _inner.DeleteAsync(req, options, ct);
 
     protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest req, CancellationToken ct = default)
         => _inner.ListAsync(req, VfsListOptions.Default, ct);

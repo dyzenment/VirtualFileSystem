@@ -58,8 +58,20 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <summary>Renames the entry at <paramref name="path"/> to <paramref name="newName"/> within the same parent.</summary>
     Task            RenameAsync(string path, string newName, CancellationToken ct = default);
 
-    /// <summary>Deletes the entry at <paramref name="path"/>.</summary>
+    /// <summary>Deletes the entry at <paramref name="path"/>, permanently.</summary>
     Task            DeleteAsync(string path, CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes the entry at <paramref name="path"/>. A bare <see cref="VfsDeleteDisposition"/>
+    /// converts implicitly, so <c>DeleteAsync(path, VfsDeleteDisposition.Recycle)</c> binds.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="VfsDeleteDisposition.Recycle"/> throws <see cref="NotSupportedException"/> rather
+    /// than falling back when the backend or volume has no recoverable delete - use
+    /// <see cref="VfsDeleteDisposition.RecycleIfAvailable"/> where a permanent delete is an acceptable
+    /// second best. Ask <c>GetEntryCapability&lt;IRecycling&gt;(path)</c> to know in advance.
+    /// </remarks>
+    Task            DeleteAsync(string path, VfsDeleteOptions? options, CancellationToken ct = default);
 
     /// <summary>Returns whether an entry exists at <paramref name="path"/>, following symlinks.</summary>
     Task<bool>      ExistsAsync(string path, CancellationToken ct = default);

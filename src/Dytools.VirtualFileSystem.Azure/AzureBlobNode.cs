@@ -232,8 +232,18 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
     }
 
     /// <summary>Deletes the blob (including snapshots) and removes it from the mirror. No-op when the path is not a blob.</summary>
-    public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    /// <remarks>
+    /// Recycling is refused. A container with soft delete enabled already makes this call recoverable
+    /// for the retention period, but that is a service-side policy this node does not read, and
+    /// promising a recoverable delete it cannot verify is exactly the failure
+    /// <see cref="VfsDeleteDisposition.Recycle"/> exists to prevent. Use
+    /// <see cref="VfsDeleteDisposition.RecycleIfAvailable"/> if a permanent delete is acceptable.
+    /// </remarks>
+    public override async Task DeleteAsync(
+        VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: false, request.Path);
+
         var (container, name) = Locate(Rel(request));
         if (container is null || name.Length == 0) return;   // not a blob
         await container.GetBlobClient(name)

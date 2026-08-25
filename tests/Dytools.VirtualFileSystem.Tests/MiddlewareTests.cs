@@ -203,7 +203,7 @@ internal sealed class SymlinkTestNode : VfsNodeBase, ISymlinkCapableNode
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? mode = null, CancellationToken ct = default)
         => throw new NotSupportedException();
 
-    public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
+    public override Task DeleteAsync(VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
         var key = new string(req.Path.PathSpan);
         _data.TryRemove(key, out _);
@@ -247,8 +247,8 @@ internal sealed class CallTrackingNode(IVfsNode inner) : VfsNodeBase
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest req, VfsWriteOptions? mode = null, CancellationToken ct = default)
         => inner.OpenWriteAsync(req, mode, ct);
 
-    public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
-        => inner.DeleteAsync(req, ct);
+    public override Task DeleteAsync(VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
+        => inner.DeleteAsync(req, options, ct);
 
     public override Task<bool> ExistsAsync(VfsNodeRequest req, CancellationToken ct = default)
         => inner.ExistsAsync(req, ct);

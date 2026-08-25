@@ -152,7 +152,7 @@ Everything is driven through the injected `IVirtualFileSystem`:
 | Category | Members |
 |---|---|
 | Streams | `OpenReadAsync`, `OpenWriteAsync` - a bare `VfsWriteMode` or a full `VfsWriteOptions` |
-| File ops | `CopyAsync`, `MoveAsync`, `RenameAsync`, `DeleteAsync` |
+| File ops | `CopyAsync`, `MoveAsync`, `RenameAsync`, `DeleteAsync` - with `VfsDeleteOptions` to recycle rather than destroy |
 | Metadata | `ExistsAsync`, `GetInfoAsync`, `ListAsync`, `ListInfoAsync` - with `VfsMetadataOptions` to follow symlinks or not |
 | Extensions | `ReadAsStringAsync`, `WriteStringAsync`, `ReadAllBytesAsync`, `WriteAllBytesAsync`, `SendAsync<T>`, `RetrieveAsync<T>` |
 | Scoping | `ScopeTo(path)` - a sub-rooted view; `Mount` / `Unmount` (instance-scoped) |
@@ -254,6 +254,44 @@ the content), `ComputeAndStore` (also write it back to the service, where the ba
 
 Values are lowercase hex, except QuickXor which keeps the base64 Graph reports. `NativeAlgorithms`
 lists what a node can answer for free; `ComputableAlgorithms` what it can produce by reading.
+
+### Recycling
+`DeleteAsync` takes an optional `VfsDeleteOptions` carrying a **disposition**: where the entry goes.
+
+```csharp
+await vfs.DeleteAsync("/local/report.pdf");                                    // permanent (default)
+await vfs.DeleteAsync("/local/report.pdf", VfsDeleteDisposition.Recycle);      // or throw
+await vfs.DeleteAsync("/local/report.pdf", VfsDeleteDisposition.RecycleIfAvailable);
+```
+
+`Recycle` is strict: it throws `NotSupportedException` when the backend - or the particular volume the
+entry sits on - has no recoverable delete. That is deliberate. Windows silently and permanently
+destroys anything it cannot recycle (a UNC path, a volume with the bin disabled, a file over the
+bin's quota), and a request that quietly degraded into that would be the worst thing this API could
+do. Reach for `RecycleIfAvailable` where a permanent delete is an acceptable second best.
+
+Ask in advance with the `IRecycling` entry capability - per entry rather than per node, because one
+mount can span volumes:
+
+```csharp
+var recycling = vfs.GetEntryCapability<IRecycling>("/local/report.pdf");
+if (recycling is not null && await recycling.CanRecycleAsync()) { /* ... */ }
+```
+
+`LocalFsNode` talks to the real OS bin on all three platforms - `SHFileOperationW` with `FOF_ALLOWUNDO`
+on Windows, `NSFileManager.trashItemAtURL:` on macOS, and the freedesktop.org trash specification
+(`$XDG_DATA_HOME/Trash`, plus per-volume `.Trash-$uid`) on Linux. Restore from Explorer, Finder or
+your file manager works, because none of it writes into a bin directory by hand. SharePoint recycles
+unconditionally - Graph's delete moves the item to the site recycle bin and offers no hard delete, so
+`Permanent` there is best-effort. S3, Azure, dedupe and in-memory report no bin.
+
+`MoveAsync` always deletes its source permanently, whatever the caller asked for elsewhere: the
+destination now holds the bytes, and parking a second copy in the bin would make every move something
+to go and clean up.
+
+> On a mount rooted at a volume root, the bin lives *inside* the mount - `C:\$Recycle.Bin`,
+> `~/.local/share/Trash`. Both are hidden, so default listings skip them; pass
+> `IncludeHidden = true` and you will see them.
 
 ### Entry metadata
 `GetInfoAsync` / `ListInfoAsync` return a `VfsEntryInfo` - path, kind, size, timestamps,
