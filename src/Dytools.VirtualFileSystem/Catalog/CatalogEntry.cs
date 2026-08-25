@@ -19,9 +19,15 @@ public sealed record CatalogEntry
 
     /// <summary>
     /// Storage key for the bytes (the "inode"). Defaults to the content hash, but a node
-    /// may use a friendlier key (e.g. the first file name that stored this content). Null for directories.
+    /// may use a friendlier key (e.g. the first file name that stored this content).
+    /// <para>
+    /// Usually null for directories, which have no bytes - but a node mirroring a backend that gives
+    /// folders a stable identity of their own puts it here too, so a folder can be found by that
+    /// identity rather than by its path. Indexed, and the only field a lookup can key on besides the
+    /// path itself.
+    /// </para>
     /// </summary>
-    public          string?        ContentId   { get; init; }   // null for directories
+    public          string?        ContentId   { get; init; }
 
     /// <summary>
     /// Content hash - what dedup compares on. Equal to <see cref="ContentId"/> unless the node uses a

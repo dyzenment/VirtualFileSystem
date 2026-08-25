@@ -89,6 +89,26 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog, IContentAddress
         finally { _gate.Release(); }
     }
 
+    /// <summary>
+    /// The referencing entries, snapshotted under the gate rather than streamed from the live
+    /// dictionary - overrides the interface default, which would walk the namespace directory by
+    /// directory to learn what is already sitting in memory here.
+    /// </summary>
+    public async IAsyncEnumerable<CatalogEntry> ListByContentIdAsync(
+        string contentId, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        List<CatalogEntry> matches;
+        await _gate.WaitAsync(ct);
+        try
+        {
+            await EnsureLoadedAsync(ct);
+            matches = _entries!.Values.Where(e => e.ContentId == contentId).ToList();
+        }
+        finally { _gate.Release(); }
+
+        foreach (var m in matches) { ct.ThrowIfCancellationRequested(); yield return m; }
+    }
+
     /// <inheritdoc />
     public async ValueTask<string?> FindContentIdByHashAsync(string hash, CancellationToken ct = default)
     {
@@ -135,7 +155,20 @@ public sealed class JsonFileVfsCatalog : IPartitionedVfsCatalog, IContentAddress
     private CatalogEntry? PutEntryInMemory(CatalogEntry entry)
     {
         var key = Key(entry.Path);
-        if (entry.IsDirectory) { EnsureDir(key, entry.ModifiedAt); return null; }
+        if (entry.IsDirectory)
+        {
+            if (key.Length == 0) return null;                      // the root is implicit
+            EnsureDir(Parent(key), entry.ModifiedAt);              // ancestors, synthesized as before
+            if (_entries!.TryGetValue(key, out var occupant) && !occupant.IsDirectory)
+                throw new IOException($"Cannot write directory over existing file: '{key}'.");
+
+            // Store the entry itself rather than a synthesized stand-in. A mirror keys its rows on the
+            // backend's identifier for the item (ContentId), and a folder row that arrives without one
+            // cannot be matched when the backend later reports that folder deleted. Children live under
+            // their own keys, so replacing this row leaves the subtree untouched.
+            _entries[key] = entry;
+            return null;                                           // a directory upsert displaces nothing
+        }
 
         EnsureDir(Parent(key), entry.ModifiedAt);
         _entries!.TryGetValue(key, out var prev);

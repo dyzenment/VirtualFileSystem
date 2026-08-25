@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Dytools.VirtualFileSystem.Catalog;
 
 /// <summary>
@@ -23,4 +25,38 @@ public interface IContentAddressedCatalog : IVfsCatalog
     /// what makes a second copy of the same bytes cost nothing.
     /// </summary>
     ValueTask<string?> FindContentIdByHashAsync(string hash, CancellationToken ct = default);
+
+    /// <summary>
+    /// Every entry currently referencing <paramref name="contentId"/> - the reverse of
+    /// <see cref="CatalogEntry.ContentId"/>, and what "which paths share these bytes" resolves to.
+    /// <para>
+    /// Non-unique by nature where a node dedupes: one copy of the bytes behind many paths is the
+    /// point, so this yields zero, one, or many. A node that keeps the key unique within its
+    /// partition - a mirror storing a backend item id - can treat a second match as corruption to
+    /// repair rather than a normal result.
+    /// </para>
+    /// <para>
+    /// <see cref="ReferenceCountAsync"/> counts the same set and stays separate because a store can
+    /// answer a count without materializing the rows; implementations overriding one should keep the
+    /// other in step. The default walks the whole namespace: correct anywhere, but O(entries).
+    /// Implementations that index <see cref="CatalogEntry.ContentId"/>, or that already hold the
+    /// namespace in memory, override it.
+    /// </para>
+    /// </summary>
+    /// <param name="contentId">The storage key to find referencing entries for.</param>
+    /// <param name="ct">A token to cancel the enumeration.</param>
+    async IAsyncEnumerable<CatalogEntry> ListByContentIdAsync(
+        string contentId, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var pending = new Stack<VfsPath>();
+        pending.Push(VfsPath.From(""));
+        while (pending.Count > 0)
+        {
+            await foreach (var e in ListChildrenAsync(pending.Pop(), ct))
+            {
+                if (e.IsDirectory) pending.Push(e.Path);
+                else if (e.ContentId == contentId) yield return e;
+            }
+        }
+    }
 }

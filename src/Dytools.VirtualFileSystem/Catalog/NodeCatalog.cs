@@ -230,10 +230,20 @@ public sealed class NodeCatalog
         IsSymlink    = e.Properties?.ContainsKey(VfsPropertyKeys.SymlinkTarget) == true,
         SymlinkTarget = e.Properties is null ? null
             : e.Properties.TryGetValue(VfsPropertyKeys.SymlinkTarget, out var target) ? target : null,
-        Properties   = e.Properties is null
-            ? ImmutableDictionary<string, string?>.Empty
-            : ImmutableDictionary.CreateRange(e.Properties),
+        Properties   = WithContentId(e),
     };
+
+    // ContentId is a column, not a property, so surface it under the well-known key on the way out -
+    // the same overlay DedupeNode applies. Without it a mirrored listing would drop the node's
+    // identifier for the entry, and a round-trip back through ToEntry would silently lose it.
+    private static ImmutableDictionary<string, string?> WithContentId(CatalogEntry e)
+    {
+        var props = e.Properties is null
+            ? ImmutableDictionary<string, string?>.Empty
+            : ImmutableDictionary.CreateRange(e.Properties);
+
+        return e.ContentId is null ? props : props.SetItem(VfsPropertyKeys.ContentId, e.ContentId);
+    }
 
     private static CatalogEntry ToEntry(VfsNodeInfo info) => new()
     {
@@ -244,19 +254,25 @@ public sealed class NodeCatalog
         ModifiedAt  = info.ModifiedAt ?? default,
         AccessedAt  = info.AccessedAt,
         ContentType = info.Properties.GetString("ContentType"),
+        // The inbound half of the same convention: a node that knows its backend's identifier for an
+        // entry publishes it under VfsPropertyKeys.ContentId, and it lands in the indexed column.
+        ContentId   = info.Properties.GetString(VfsPropertyKeys.ContentId),
         Properties  = BuildProperties(info),
     };
 
     // Persists the symlink target alongside the node's own extras, so ToNodeInfo can recover the kind.
+    // ContentId goes the other way: it is promoted to its own column by ToEntry, so it is dropped from
+    // the bag here rather than persisted twice - one source of truth for the value the lookup indexes.
+    // ToNodeInfo puts it back under the same key on the way out.
     private static Dictionary<string, string?>? BuildProperties(VfsNodeInfo info)
     {
-        if (info.SymlinkTarget is null)
+        if (info.SymlinkTarget is null && !info.Properties.ContainsKey(VfsPropertyKeys.ContentId))
             return info.Properties.Count > 0 ? new Dictionary<string, string?>(info.Properties) : null;
 
-        var props = new Dictionary<string, string?>(info.Properties)
-        {
-            [VfsPropertyKeys.SymlinkTarget] = info.SymlinkTarget,
-        };
-        return props;
+        var props = new Dictionary<string, string?>(info.Properties);
+        props.Remove(VfsPropertyKeys.ContentId);
+        if (info.SymlinkTarget is { } target) props[VfsPropertyKeys.SymlinkTarget] = target;
+
+        return props.Count > 0 ? props : null;
     }
 }

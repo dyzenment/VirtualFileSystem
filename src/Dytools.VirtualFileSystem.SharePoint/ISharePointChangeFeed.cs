@@ -10,7 +10,9 @@ namespace Dytools.VirtualFileSystem.Nodes.SharePoint;
 /// changes, then persist the returned cursor (apply-then-save, idempotent, so a crash re-delivers
 /// rather than drops). Graph reports upserts as <see cref="SharePointChangeType.Updated"/> (it
 /// can't reliably split create from update); deletes arrive as
-/// <see cref="SharePointChangeType.Deleted"/> with a null <see cref="SharePointChange.Info"/>.
+/// <see cref="SharePointChangeType.Deleted"/> with a null <see cref="SharePointChange.Info"/> and,
+/// usually, a null <see cref="SharePointChange.Path"/> - match those on
+/// <see cref="SharePointChange.Id"/>.
 /// </para>
 /// </summary>
 public interface ISharePointChangeFeed : INodeCapability
@@ -30,13 +32,19 @@ public interface ISharePointChangeFeed : INodeCapability
 public sealed record SharePointChangeBatch(IReadOnlyList<SharePointChange> Changes, string Cursor);
 
 /// <summary>
-/// One change. <paramref name="Path"/> is relative to the mount; <paramref name="Info"/> carries
-/// current metadata for an upsert and is null for a delete.
+/// One change, identified by <paramref name="Id"/> - the driveItem id, which is stable across renames
+/// and moves and is the only field a deletion is guaranteed to report.
+/// <para>
+/// <paramref name="Path"/> is best-effort and NULL for a deletion whose tombstone carried no name or
+/// parent path, which is the normal shape. Match a delete on <paramref name="Id"/>; treat the path as
+/// context only.
+/// </para>
 /// </summary>
-/// <param name="Path">The mount-relative path of the changed item.</param>
+/// <param name="Path">The mount-relative path, or null when the change did not report one.</param>
 /// <param name="Type">Whether the item was upserted or deleted.</param>
 /// <param name="Info">Current metadata for an upsert; null for a delete.</param>
-public sealed record SharePointChange(string Path, SharePointChangeType Type, VfsNodeInfo? Info);
+/// <param name="Id">The driveItem id. Always present on a deletion; null only for a malformed item.</param>
+public sealed record SharePointChange(string? Path, SharePointChangeType Type, VfsNodeInfo? Info, string? Id);
 
 /// <summary>The kind of change reported by the delta feed.</summary>
 public enum SharePointChangeType

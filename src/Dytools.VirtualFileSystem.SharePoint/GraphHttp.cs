@@ -70,6 +70,9 @@ internal sealed class ThrottleRetryHandler : DelegatingHandler
 
 internal sealed class DriveItem
 {
+    // The drive-scoped item id. Stable across renames and moves, and the ONLY field a delta
+    // tombstone is guaranteed to carry - which is why the mirror keys on it rather than on a path.
+    public string?          Id                   { get; set; }
     public string?          Name                 { get; set; }
     public long?            Size                 { get; set; }
     public DateTimeOffset?  CreatedDateTime      { get; set; }

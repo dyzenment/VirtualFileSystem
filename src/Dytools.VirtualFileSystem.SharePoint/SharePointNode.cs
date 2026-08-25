@@ -92,6 +92,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         _mirror      = mirror;
         _logger      = logger;
 
+        // Deletions are matched on the driveItem id, mirrored into CatalogEntry.ContentId. Saying so
+        // at mount time beats a cast failure on the first delta that carries a tombstone.
+        if (mirror is not null && mirror.Catalog is not IContentAddressedCatalog)
+            throw new InvalidOperationException(
+                $"A caching SharePoint mount requires a catalog implementing {nameof(IContentAddressedCatalog)}; "
+                + $"the registered {mirror.Catalog.GetType().Name} only provides the namespace operations.");
+
         if (_driveId is null && string.IsNullOrWhiteSpace(_sitePath))
             throw new ArgumentException(
                 "A SharePoint mount needs a drive id (UseSharePointDrive) or a site (UseSharePointSite).");
@@ -454,18 +461,32 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
     private SharePointChange? ToChange(DriveItem item)
     {
-        if (item.Root is not null || item.Name is null) return null;   // the drive root itself
+        if (item.Root is not null) return null;                        // the drive root itself
 
-        var parentRel = ParentRelPath(item.ParentReference?.Path);
-        if (parentRel is null) return null;
-        var drivePath = parentRel.Length == 0 ? item.Name : $"{parentRel}/{item.Name}";
+        // Deletions are tested BEFORE anything path-derived. A tombstone is a minimal object - an id
+        // and the deleted facet - so it carries no name and its parentReference has no path. Requiring
+        // either first is how every deletion used to be discarded, leaving the mirror append-only.
+        if (item.Deleted is not null)
+            return item.Id is null
+                ? null                                                 // nothing to match it on
+                : new SharePointChange(MountRelPath(item), SharePointChangeType.Deleted, null, item.Id);
 
-        var mountRel = StripRoot(drivePath);
-        if (mountRel is null) return null;                             // outside this mount's root
+        // Upserts carry full metadata, and a path is what an upsert is keyed on.
+        if (item.Name is null) return null;
+        if (MountRelPath(item) is not { } mountRel) return null;       // outside this mount's root
 
-        return item.Deleted is not null
-            ? new SharePointChange(mountRel, SharePointChangeType.Deleted, null)
-            : new SharePointChange(mountRel, SharePointChangeType.Updated, ToNodeInfo(item, VfsPath.From(mountRel)));
+        return new SharePointChange(
+            mountRel, SharePointChangeType.Updated, ToNodeInfo(item, VfsPath.From(mountRel)), item.Id);
+    }
+
+    // Mount-relative path for an item, or null when Graph reported no resolvable parent path (a
+    // tombstone) or the item sits outside this mount's root.
+    private string? MountRelPath(DriveItem item)
+    {
+        if (item.Name is null) return null;
+        if (ParentRelPath(item.ParentReference?.Path) is not { } parentRel) return null;
+
+        return StripRoot(parentRel.Length == 0 ? item.Name : $"{parentRel}/{item.Name}");
     }
 
     // -- Content hashes --------------------------------------------------------
@@ -558,14 +579,19 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
                 await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
                 {
-                    var deletes = new List<VfsPath>();
-                    var upserts = new List<VfsNodeInfo>();
+                    var deletedIds = new List<string>();
+                    var upserts    = new List<VfsNodeInfo>();
                     foreach (var change in page.Changes)
-                        if (change.Type == SharePointChangeType.Deleted) deletes.Add(VfsPath.From(change.Path));
+                        if (change.Type == SharePointChangeType.Deleted) { if (change.Id is { } id) deletedIds.Add(id); }
                         else if (change.Info is not null)                upserts.Add(change.Info);
 
-                    if (deletes.Count > 0) await mirror.RemoveAsync(deletes, ct);
-                    if (upserts.Count > 0) await mirror.UpsertAsync(upserts, ct);
+                    // Deletions first, so an item deleted and recreated inside one page ends up present.
+                    if (deletedIds.Count > 0) await RemoveByItemIdAsync(mirror, deletedIds, ct);
+                    if (upserts.Count > 0)
+                    {
+                        await RemoveStaleAliasesAsync(mirror, upserts, ct);
+                        await mirror.UpsertAsync(upserts, ct);
+                    }
                     if (page.Continuation is not null) await mirror.SetStateAsync("cursor", page.Continuation, ct);
 
                     applied += page.Changes.Count;
@@ -592,6 +618,57 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             }
         }
         // exhausted attempts → serve whatever is mirrored
+    }
+
+    // Removes mirrored entries by driveItem id. The id rides in CatalogEntry.ContentId (see
+    // ToNodeInfo), so each tombstone is an indexed lookup rather than a namespace scan. An id nothing
+    // is mirrored under is simply a deletion outside this mount's root - the delta feed is drive-wide,
+    // and a tombstone carries no path to filter on beforehand.
+    private async Task RemoveByItemIdAsync(NodeCatalog mirror, List<string> itemIds, CancellationToken ct)
+    {
+        var catalog = (IContentAddressedCatalog)mirror.Catalog;
+        var paths   = new List<VfsPath>();
+
+        foreach (var id in itemIds)
+        {
+            var before = paths.Count;
+            await foreach (var entry in catalog.ListByContentIdAsync(id, ct))
+                paths.Add(entry.Path);
+
+            // One id at several paths means the mirror drifted - remove them all and say so, rather
+            // than leaving whichever copy the lookup happened not to return.
+            if (paths.Count - before > 1)
+                _logger?.LogWarning(
+                    "SharePoint item '{ItemId}' is mirrored at {Count} paths; removing all of them.",
+                    id, paths.Count - before);
+        }
+
+        if (paths.Count > 0) await mirror.RemoveAsync(paths, ct);
+    }
+
+    // Drops any mirrored row holding an incoming item's id at some OTHER path, leaving the incoming
+    // path to be upserted. Two cases collapse into one here: a rename or move made outside the VFS,
+    // which Graph reports as an upsert at the new path and never mentions the old one - and genuine
+    // drift, where an id ended up on more than one row. Either way one item means one row.
+    private async Task RemoveStaleAliasesAsync(NodeCatalog mirror, List<VfsNodeInfo> upserts, CancellationToken ct)
+    {
+        var catalog = (IContentAddressedCatalog)mirror.Catalog;
+        List<VfsPath>? stale = null;
+
+        foreach (var info in upserts)
+        {
+            if (info.Properties.GetString(VfsPropertyKeys.ContentId) is not { } id) continue;
+
+            await foreach (var entry in catalog.ListByContentIdAsync(id, ct))
+                if (!entry.Path.Equals(info.RelativePath))
+                    (stale ??= []).Add(entry.Path);
+        }
+
+        if (stale is null) return;
+
+        _logger?.LogDebug(
+            "SharePoint delta: dropping {Count} mirrored row(s) whose item now lives elsewhere.", stale.Count);
+        await mirror.RemoveAsync(stale, ct);
     }
 
     // -- Helpers ---------------------------------------------------------------
@@ -633,6 +710,12 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         var isDir = item.Folder is not null || item.Root is not null;
 
         var props = ImmutableDictionary<string, string?>.Empty;
+
+        // The driveItem id, carried as the entry's content id: for this mirror the "storage key for
+        // the bytes" IS Graph's handle for the item, and unlike the path it survives a rename and is
+        // all a delta tombstone reports. NodeCatalog lifts this key into CatalogEntry.ContentId,
+        // which is the indexed column, so a deletion resolves without scanning the namespace.
+        if (item.Id is not null)           props = props.Add(VfsPropertyKeys.ContentId, item.Id);
         if (item.ETag is not null)         props = props.Add("ETag", item.ETag);
         if (item.File?.MimeType is { } mt) props = props.Add("ContentType", mt);
         if (item.WebUrl is not null)       props = props.Add("WebUrl", item.WebUrl);

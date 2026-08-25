@@ -78,8 +78,8 @@ public sealed class JsonFileVfsCatalogTests
         { Writes++; return _inner.OpenWriteAsync(r, m, ct); }
         public override Task RenameAsync(VfsNodeRequest r, string newName, CancellationToken ct = default)
             => _inner.RenameAsync(r, newName, ct);
-        public override Task DeleteAsync(VfsNodeRequest r, CancellationToken ct = default)
-            => _inner.DeleteAsync(r, ct);
+        public override Task DeleteAsync(VfsNodeRequest r, VfsDeleteOptions? o = null, CancellationToken ct = default)
+            => _inner.DeleteAsync(r, o, ct);
         public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest r, CancellationToken ct = default)
             => _inner.GetInfoAsync(r, ct);
         protected override IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(VfsNodeRequest r, CancellationToken ct = default)
@@ -242,4 +242,139 @@ public sealed class JsonFileVfsCatalogTests
         Assert.Null(e.Properties);
         Assert.Null(e.Properties.GetString("anything"));   // accessor tolerates a null bag
     }
+
+    // -- Directory entries -----------------------------------------------------
+
+    private static CatalogEntry Dir(string path, string? contentId = null) => new()
+    {
+        Path        = P(path),
+        IsDirectory = true,
+        ContentId   = contentId,
+        ModifiedAt  = DateTimeOffset.UnixEpoch,
+        CreatedAt   = DateTimeOffset.UnixEpoch,
+        Properties  = new Dictionary<string, string?> { ["Marker"] = "kept" },
+    };
+
+    [Fact]
+    public async Task PutEntry_Directory_KeepsItsMetadata()
+    {
+        // A mirror keys folder rows on the backend's id, so a directory upsert has to store the entry
+        // it was handed rather than a synthesized one carrying only the path.
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(Dir("docs", "01DOCS"));
+
+        var e = await cat.GetAsync(P("docs"));
+        Assert.True(e!.IsDirectory);
+        Assert.Equal("01DOCS", e.ContentId);
+        Assert.Equal("kept", e.Properties!["Marker"]);
+    }
+
+    [Fact]
+    public async Task PutEntry_Directory_IsFoundByContentId_AndRemovesItsSubtree()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(Dir("docs", "01DOCS"));
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
+
+        var found = new List<CatalogEntry>();
+        await foreach (var e in cat.ListByContentIdAsync("01DOCS")) found.Add(e);
+        Assert.Equal("docs", Assert.Single(found).Path.ToString());
+
+        await foreach (var _ in cat.RemoveAsync(found[0].Path)) { }
+        Assert.Null(await cat.GetAsync(P("docs")));
+        Assert.Null(await cat.GetAsync(P("docs/a.txt")));
+    }
+
+    [Fact]
+    public async Task PutEntry_Directory_SurvivesReload_AndLeavesAncestorsBare()
+    {
+        var store = new InMemoryKvNode();
+        await new JsonFileVfsCatalog(store).PutEntryAsync(Dir("a/b/deep", "01DEEP"));
+
+        var reopened = new JsonFileVfsCatalog(store);
+        Assert.Equal("01DEEP", (await reopened.GetAsync(P("a/b/deep")))!.ContentId);
+        Assert.Null((await reopened.GetAsync(P("a/b")))!.ContentId);   // synthesized ancestor, no identity
+    }
+
+    [Fact]
+    public async Task PutEntry_Directory_DoesNotDisturbExistingChildren()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
+        await cat.PutEntryAsync(Dir("docs", "01DOCS"));            // re-upsert the parent afterwards
+
+        Assert.Equal("h1", (await cat.GetAsync(P("docs/a.txt")))!.ContentId);
+        Assert.Equal("01DOCS", (await cat.GetAsync(P("docs")))!.ContentId);
+    }
+
+    [Fact]
+    public async Task PutEntry_Directory_OverAFile_Throws()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(File("thing", "h1"));
+
+        await Assert.ThrowsAsync<IOException>(async () => await cat.PutEntryAsync(Dir("thing")));
+    }
+
+    // -- ListByContentIdAsync --------------------------------------------------
+
+    [Fact]
+    public async Task ListByContentId_ReturnsEveryReferencingPath()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(File("docs/a.txt", "shared"));
+        await cat.PutEntryAsync(File("docs/deep/b.txt", "shared"));
+        await cat.PutEntryAsync(File("docs/c.txt", "other"));
+
+        var paths = new List<string>();
+        await foreach (var e in cat.ListByContentIdAsync("shared")) paths.Add(e.Path.ToString());
+
+        Assert.Equal(["docs/a.txt", "docs/deep/b.txt"], paths.Order());
+        Assert.Equal(await cat.ReferenceCountAsync("shared"), paths.Count);   // agrees with IContentAddressedCatalog
+    }
+
+    [Fact]
+    public async Task ListByContentId_EmptyForUnreferencedContent()
+    {
+        var cat = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await cat.PutEntryAsync(File("docs/a.txt", "h1"));
+
+        var any = false;
+        await foreach (var _ in cat.ListByContentIdAsync("collected")) any = true;
+
+        Assert.False(any);
+        Assert.Equal(0, await cat.ReferenceCountAsync("collected"));
+    }
+
+    [Fact]
+    public async Task ListByContentId_InterfaceDefault_WalksTheWholeNamespace()
+    {
+        // A catalog that implements the interface without overriding the member, so the walking
+        // default is what runs - it has to find nested entries, not just the root's children.
+        IContentAddressedCatalog inner = new JsonFileVfsCatalog(new InMemoryKvNode());
+        await inner.PutEntryAsync(File("a.txt", "shared"));
+        await inner.PutEntryAsync(File("x/y/z/deep.txt", "shared"));
+        await inner.PutEntryAsync(File("x/y/other.txt", "elsewhere"));
+
+        IContentAddressedCatalog cat = new UnindexedContentCatalog(inner);
+
+        var paths = new List<string>();
+        await foreach (var e in cat.ListByContentIdAsync("shared")) paths.Add(e.Path.ToString());
+
+        Assert.Equal(["a.txt", "x/y/z/deep.txt"], paths.Order());
+    }
+}
+
+// Forwards every member of the interface EXCEPT ListByContentIdAsync, so calls to it bind to the
+// default implementation on IContentAddressedCatalog rather than to JsonFileVfsCatalog's override.
+file sealed class UnindexedContentCatalog(IContentAddressedCatalog inner) : IContentAddressedCatalog
+{
+    public ValueTask<CatalogEntry?> GetAsync(VfsPath p, CancellationToken ct = default) => inner.GetAsync(p, ct);
+    public IAsyncEnumerable<CatalogEntry> ListChildrenAsync(VfsPath p, CancellationToken ct = default) => inner.ListChildrenAsync(p, ct);
+    public ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry e, CancellationToken ct = default) => inner.PutEntryAsync(e, ct);
+    public ValueTask EnsureDirectoryAsync(VfsPath p, DateTimeOffset ts, CancellationToken ct = default) => inner.EnsureDirectoryAsync(p, ts, ct);
+    public IAsyncEnumerable<CatalogEntry> RemoveAsync(VfsPath p, CancellationToken ct = default) => inner.RemoveAsync(p, ct);
+    public ValueTask MoveAsync(VfsPath from, VfsPath to, CancellationToken ct = default) => inner.MoveAsync(from, to, ct);
+    public ValueTask<int> ReferenceCountAsync(string id, CancellationToken ct = default) => inner.ReferenceCountAsync(id, ct);
+    public ValueTask<string?> FindContentIdByHashAsync(string h, CancellationToken ct = default) => inner.FindContentIdByHashAsync(h, ct);
 }
