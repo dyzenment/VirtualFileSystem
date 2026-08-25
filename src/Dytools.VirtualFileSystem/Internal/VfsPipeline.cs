@@ -42,10 +42,11 @@ internal sealed class VfsPipeline
             _writeChain = chain;
         }
 
-        // Delete
+        // Delete - disposition (permanent / recycle) is carried on ctx.Operation
         {
             Func<VfsContext, CancellationToken, Task> chain =
-                static (ctx, ct) => ctx.ResolvedNode.DeleteAsync(ctx.BuildNodeRequest(), ct);
+                static (ctx, ct) => ctx.ResolvedNode.DeleteAsync(
+                    ctx.BuildNodeRequest(), ctx.DeleteOptions ?? VfsDeleteOptions.Default, ct);
             for (var i = mw.Count - 1; i >= 0; i--)
             { var m = mw[i]; var next = chain; chain = (ctx, ct) => m.InvokeDeleteAsync(ctx, next, ct); }
             _deleteChain = chain;
@@ -120,8 +121,11 @@ internal sealed class VfsPipeline
         return _writeChain(ctx, ct);
     }
 
-    public Task ExecuteDeleteAsync(VfsContext ctx, CancellationToken ct)
-        => _deleteChain(ctx, ct);
+    public Task ExecuteDeleteAsync(VfsContext ctx, VfsDeleteOptions options, CancellationToken ct)
+    {
+        ctx.Operation = options;
+        return _deleteChain(ctx, ct);
+    }
 
     public Task ExecuteCopyAsync(VfsContext src, VfsContext dst, CancellationToken ct)
         => _copyChain(src, dst, ct);
@@ -174,8 +178,10 @@ internal sealed class VfsPipeline
             await src.ResolvedNode.MoveAsync(src.BuildNodeRequest(), dst.BuildNodeRequest(), ct);
             return;
         }
-        // Cross-node: copy then delete - no atomicity guarantee (document this).
+        // Cross-node: copy then delete - no atomicity guarantee (document this). The delete is
+        // explicitly permanent: the bytes now live at the destination, and leaving a copy of them in
+        // a recycle bin would turn every move into something the user has to go and empty.
         await TerminalCopyAsync(src, dst, ct);
-        await src.ResolvedNode.DeleteAsync(src.BuildNodeRequest(), ct);
+        await src.ResolvedNode.DeleteAsync(src.BuildNodeRequest(), VfsDeleteOptions.Default, ct);
     }
 }

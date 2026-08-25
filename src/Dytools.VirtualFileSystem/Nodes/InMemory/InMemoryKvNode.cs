@@ -75,9 +75,15 @@ public sealed class InMemoryKvNode : VfsNodeBase
         finally { _lock.ExitWriteLock(); }
     }
 
-    /// <inheritdoc/>
-    public override Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    /// <summary>
+    /// Removes the key. A dictionary has nowhere to put a recoverable delete, so
+    /// <see cref="VfsDeleteDisposition.Recycle"/> is refused rather than silently ignored.
+    /// </summary>
+    public override Task DeleteAsync(
+        VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: false, request.Path);
+
         var key = BuildKey(request.Path.PathSpan, request.Path.StreamSpan);
         _lock.EnterWriteLock();
         try   { _store.Remove(key); }

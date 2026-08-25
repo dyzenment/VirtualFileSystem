@@ -293,8 +293,19 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     // -- Delete / Rename / Move (native, catalog kept in step) -----------------
 
     /// <summary>Deletes the item (no-op if already gone), keeping any mirror in step.</summary>
-    public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    /// <remarks>
+    /// Uniquely among the backends here, this delete is <em>always</em> recoverable: Graph's
+    /// <c>DELETE /drive/items/{id}</c> moves the item to the site recycle bin rather than destroying
+    /// it, and there is no first-class hard delete to ask for instead. So
+    /// <see cref="VfsDeleteDisposition.Recycle"/> is honoured, and
+    /// <see cref="VfsDeleteDisposition.Permanent"/> is best-effort - the item still lands in the site
+    /// recycle bin, and emptying that is a site-administration matter.
+    /// </remarks>
+    public override async Task DeleteAsync(
+        VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: true, request.Path);
+
         await EnsureDriveIdAsync(ct);
         var resp = await _http.DeleteAsync(ItemUrl(DrivePath(Rel(request))), ct);
         if (resp.StatusCode != HttpStatusCode.NotFound) resp.EnsureSuccessStatusCode();
@@ -460,10 +471,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     // -- Content hashes --------------------------------------------------------
 
     /// <summary>
-    /// Hashing is bound to the entry asked for, so the capability itself takes no path.
+    /// Hashing is bound to the entry asked for, so the capability itself takes no path. Recycling is
+    /// always available here - see <see cref="DeleteAsync"/> for why it is not optional.
     /// </summary>
     public override T? GetEntryCapability<T>(VfsPath relativePath) where T : class
-        => new SharePointEntryHashing(this, relativePath) as T;
+        => typeof(T) == typeof(IRecycling)
+            ? new AlwaysRecycling() as T
+            : new SharePointEntryHashing(this, relativePath) as T;
 
     // Serves SharePointEntryHashing.
     internal async Task<string?> GetEntryHashAsync(
@@ -682,4 +696,15 @@ internal sealed class SharePointEntryHashing(SharePointNode node, VfsPath path) 
     public Task<string?> GetHashAsync(
         string algorithm, VfsHashBudget budget = VfsHashBudget.Fetch, CancellationToken ct = default)
         => node.GetEntryHashAsync(path, algorithm, budget, ct);
+}
+
+
+/// <summary>
+/// A backend whose delete is recoverable for every entry, unconditionally - SharePoint's site
+/// recycle bin. Stateless, so it needs no binding to the entry it was asked about.
+/// </summary>
+internal sealed class AlwaysRecycling : IRecycling
+{
+    /// <inheritdoc/>
+    public ValueTask<bool> CanRecycleAsync(CancellationToken ct = default) => ValueTask.FromResult(true);
 }

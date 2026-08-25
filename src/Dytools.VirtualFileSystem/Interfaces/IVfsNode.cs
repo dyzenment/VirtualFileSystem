@@ -12,8 +12,17 @@ public interface IVfsNode
     /// <summary>Opens a writable stream for the request using the given <see cref="VfsWriteOptions.Mode"/>.</summary>
     Task<Stream>     OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default);
 
-    /// <summary>Deletes the entry addressed by the request.</summary>
-    Task             DeleteAsync(VfsNodeRequest request, CancellationToken ct = default);
+    /// <summary>
+    /// Deletes the entry addressed by the request. <paramref name="options"/> is never null when
+    /// called through the pipeline (<see cref="VfsDeleteOptions.Default"/> at minimum).
+    /// <para>
+    /// A node that can recycle branches on
+    /// <see cref="VfsDeleteOptions.ResolveRecycle(bool, VfsPath)"/>; a node that cannot calls it with
+    /// <c>available: false</c>, which throws for a strict
+    /// <see cref="VfsDeleteDisposition.Recycle"/> and degrades to a permanent delete otherwise.
+    /// </para>
+    /// </summary>
+    Task             DeleteAsync(VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default);
 
     /// <summary>Copies the entry at <paramref name="src"/> to <paramref name="dst"/>.</summary>
     Task             CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default);

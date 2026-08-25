@@ -176,7 +176,7 @@ public sealed class DedupeNode : VfsNodeBase
 
         // GC the blob the path used to reference, if nothing else points at it now.
         if (prev?.ContentId is { } old && old != contentId && await _catalog.ReferenceCountAsync(old) == 0)
-            await _inner.DeleteAsync(BlobReq(BlobPath(old)));
+            await _inner.DeleteAsync(BlobReq(BlobPath(old)), VfsDeleteOptions.Default);
     }
 
     // Derives a readable storage key from the file name, bumping "-N" until it is unique
@@ -202,13 +202,25 @@ public sealed class DedupeNode : VfsNodeBase
 
     // -- Delete ----------------------------------------------------------------
 
-    /// <inheritdoc/>
-    public override async Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
+    /// <summary>
+    /// Drops the path from the catalog and garbage-collects the blob behind it once nothing else
+    /// references it.
+    /// </summary>
+    /// <remarks>
+    /// Recycling is refused. A path here is a catalog row rather than a file, and the bytes it points
+    /// at are usually still referenced by other paths - so there is nothing coherent to put in a bin
+    /// and nothing coherent to restore. Recycle the inner node's blobs directly if that is what you
+    /// want.
+    /// </remarks>
+    public override async Task DeleteAsync(
+        VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: false, req.Path);
+
         await foreach (var removed in _catalog.RemoveAsync(req.Path, ct))
         {
             if (removed.ContentId is { } id && await _catalog.ReferenceCountAsync(id, ct) == 0)
-                await _inner.DeleteAsync(BlobReq(BlobPath(id)), ct);
+                await _inner.DeleteAsync(BlobReq(BlobPath(id)), VfsDeleteOptions.Default, ct);
         }
     }
 

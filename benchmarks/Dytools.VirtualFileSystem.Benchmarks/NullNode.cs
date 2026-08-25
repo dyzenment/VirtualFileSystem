@@ -43,7 +43,7 @@ internal sealed class NullNode : VfsNodeBase
     public override Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest req, CancellationToken ct = default)
         => _infoTask;
 
-    public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
+    public override Task DeleteAsync(VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
         => Task.CompletedTask;
 
     public override Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)

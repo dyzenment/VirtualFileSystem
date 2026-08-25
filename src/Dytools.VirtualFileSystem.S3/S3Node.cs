@@ -135,8 +135,18 @@ public sealed class S3Node : VfsNodeBase, IRefreshableCache
     }
 
     /// <summary>Deletes the S3 object and removes it from the mirror.</summary>
-    public override async Task DeleteAsync(VfsNodeRequest request, CancellationToken ct = default)
+    /// <remarks>
+    /// Recycling is refused. On a versioned bucket this same call is already recoverable - it writes a
+    /// delete marker rather than destroying the object - but whether versioning is on is a bucket
+    /// property this node does not read, and claiming a recoverable delete that turns out to be
+    /// permanent is the one failure <see cref="VfsDeleteDisposition.Recycle"/> exists to prevent.
+    /// Use <see cref="VfsDeleteDisposition.RecycleIfAvailable"/> if a permanent delete is acceptable.
+    /// </remarks>
+    public override async Task DeleteAsync(
+        VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default)
     {
+        (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: false, request.Path);
+
         await _s3.DeleteObjectAsync(new DeleteObjectRequest { BucketName = _bucket, Key = KeyFor(Rel(request)) }, ct);
         if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
     }

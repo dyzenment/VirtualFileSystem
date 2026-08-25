@@ -19,8 +19,17 @@ public abstract class VfsNodeBase : IVfsNode
     public abstract Task<Stream?>       OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default);
     /// <summary>Opens (or creates) the content at the request's path for writing, honoring the given <see cref="VfsWriteOptions.Mode"/>.</summary>
     public abstract Task<Stream>        OpenWriteAsync(VfsNodeRequest request, VfsWriteOptions? options = null, CancellationToken ct = default);
-    /// <summary>Deletes the file or directory at the request's path.</summary>
-    public abstract Task                DeleteAsync(VfsNodeRequest request, CancellationToken ct = default);
+    /// <summary>
+    /// Deletes the file or directory at the request's path, honouring <paramref name="options"/> -
+    /// which is never null when called through the pipeline.
+    /// <para>
+    /// Every implementation should open with
+    /// <c>options.ResolveRecycle(available, request.Path)</c>: a backend with no recoverable delete
+    /// passes <c>available: false</c> and gets the right throw-or-degrade behaviour for a caller that
+    /// asked to recycle, rather than silently destroying what it was asked to keep.
+    /// </para>
+    /// </summary>
+    public abstract Task                DeleteAsync(VfsNodeRequest request, VfsDeleteOptions? options = null, CancellationToken ct = default);
     /// <summary>Returns metadata for the request's path, or <c>null</c> if it does not exist.</summary>
     public abstract Task<VfsNodeInfo?>  GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default);
 
@@ -132,7 +141,9 @@ public abstract class VfsNodeBase : IVfsNode
     public virtual async Task MoveAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         await CopyAsync(src, dst, ct);
-        await DeleteAsync(src, ct);
+        // Explicitly permanent. The destination now holds the bytes, so parking the source in a
+        // recycle bin would leave a move looking like a delete the user has to go and clean up.
+        await DeleteAsync(src, VfsDeleteOptions.Default, ct);
     }
 
     /// <summary>

@@ -21,7 +21,7 @@ internal sealed class LinkTestNode : VfsNodeBase, ISymlinkCapableNode
     public override Task<Stream> OpenWriteAsync(VfsNodeRequest r, VfsWriteOptions? o = null, CancellationToken ct = default)
         => throw new NotSupportedException();
 
-    public override Task DeleteAsync(VfsNodeRequest r, CancellationToken ct = default) => Task.CompletedTask;
+    public override Task DeleteAsync(VfsNodeRequest r, VfsDeleteOptions? o = null, CancellationToken ct = default) => Task.CompletedTask;
 
     public override Task<bool> ExistsAsync(VfsNodeRequest r, CancellationToken ct = default)
     {

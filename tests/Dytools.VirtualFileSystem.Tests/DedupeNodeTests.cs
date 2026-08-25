@@ -29,7 +29,7 @@ public sealed class DedupeNodeTests
             return Task.FromResult<Stream>(new CommitMs(bytes => _blobs[key] = bytes));
         }
 
-        public override Task DeleteAsync(VfsNodeRequest req, CancellationToken ct = default)
+        public override Task DeleteAsync(VfsNodeRequest req, VfsDeleteOptions? options = null, CancellationToken ct = default)
         {
             _blobs.TryRemove(new string(req.Path.PathSpan), out _);
             return Task.CompletedTask;

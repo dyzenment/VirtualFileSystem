@@ -99,6 +99,9 @@ public sealed class VfsContext
     /// <summary>Metadata options when a GetInfo or Exists is running, else null.</summary>
     public VfsMetadataOptions? MetadataOptions => Operation as VfsMetadataOptions;
 
+    /// <summary>Delete options when a Delete is running, else null.</summary>
+    public VfsDeleteOptions? DeleteOptions => Operation as VfsDeleteOptions;
+
     // Shared bag for within-call middleware communication.
     // Prefer typed extension methods (GetUser/SetUser) over raw access.
     // Allocated lazily - most calls never touch it.
