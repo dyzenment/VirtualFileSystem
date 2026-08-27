@@ -79,6 +79,10 @@ public enum VfsWriteMode
     /// <summary>Seek to the end of any existing content and append. Creates the entry if absent.</summary>
     Append,
 
-    /// <summary>Fail with <see cref="IOException"/> if the entry already exists.</summary>
+    /// <summary>
+    /// Fail if the entry already exists. A node that can tell should throw
+    /// <see cref="VfsException"/> with <see cref="VfsFailureReason.Conflict"/>; one that cannot
+    /// still surfaces as a <see cref="VfsException"/>, because the pipeline wraps whatever escapes.
+    /// </summary>
     CreateNew,
 }

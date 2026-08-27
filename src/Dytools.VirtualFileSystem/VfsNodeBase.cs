@@ -124,11 +124,17 @@ public abstract class VfsNodeBase : IVfsNode
     /// Copies <paramref name="src"/> to <paramref name="dst"/>. Default: read source into write destination.
     /// Override for native same-node copy (S3 CopyObject, Azure CopyBlob, <see cref="File.Copy(string, string)"/>).
     /// </summary>
-    /// <exception cref="FileNotFoundException">The source does not exist.</exception>
+    /// <exception cref="VfsException">
+    /// The source does not exist (<see cref="VfsFailureReason.NotFound"/>). Absence is only a
+    /// failure here because a copy has nothing to read - <see cref="OpenReadAsync"/> itself still
+    /// reports a missing entry by returning <c>null</c>.
+    /// </exception>
     public virtual async Task CopyAsync(VfsNodeRequest src, VfsNodeRequest dst, CancellationToken ct = default)
     {
         await using var r = await OpenReadAsync(src, ct)
-            ?? throw new FileNotFoundException($"VFS copy source not found: {VfsPath.From(src.Mount, src.Path)}");
+            ?? throw VfsFailure.Create(
+                VfsFailureReason.NotFound, VfsOperation.Copy, src,
+                $"VFS copy source not found: {VfsPath.From(src.Mount, src.Path)}");
         await using var w = await OpenWriteAsync(dst, VfsWriteMode.Create, ct);
         await r.CopyToAsync(w, ct);
     }

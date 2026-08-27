@@ -8,15 +8,20 @@ internal sealed class SharePointUploadStream : Stream
     private readonly SharePointNode _node;
     private readonly string         _drivePath;
     private readonly VfsWriteOptions _options;
+    private readonly string?        _vfsPath;      // carried so a commit failure can name the entry
+    private readonly string?        _mount;
     private readonly string         _tempPath;
     private readonly FileStream     _temp;
     private          bool           _committed;
 
-    public SharePointUploadStream(SharePointNode node, string drivePath, VfsWriteOptions options)
+    public SharePointUploadStream(
+        SharePointNode node, string drivePath, VfsWriteOptions options, string? vfsPath, string? mount)
     {
         _node      = node;
         _drivePath = drivePath;
         _options   = options;
+        _vfsPath   = vfsPath;
+        _mount     = mount;
         _tempPath  = Path.Combine(Path.GetTempPath(), "vfs-sp-" + Guid.NewGuid().ToString("N"));
         _temp      = new FileStream(_tempPath, FileMode.CreateNew, FileAccess.ReadWrite,
                                     FileShare.None, bufferSize: 4096, useAsync: true);
@@ -57,7 +62,7 @@ internal sealed class SharePointUploadStream : Stream
         _committed = true;
         try
         {
-            await _node.CommitUploadAsync(_drivePath, _temp, _options).ConfigureAwait(false);
+            await _node.CommitUploadAsync(_drivePath, _temp, _options, _vfsPath, _mount).ConfigureAwait(false);
         }
         finally
         {

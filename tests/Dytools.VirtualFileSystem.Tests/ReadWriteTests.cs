@@ -53,8 +53,13 @@ public sealed class ReadWriteTests
     {
         var vfs = VfsFactory.CreateDual();
         await VfsFactory.WriteTextAsync(vfs, "/a/file.txt", "data");
-        await Assert.ThrowsAsync<IOException>(
+        // The pipeline net guarantees the type; the reason is still Unknown because LocalFsNode has
+        // not been mapped yet. It tightens to Conflict when it is.
+        var ex = await Assert.ThrowsAsync<VfsException>(
             () => vfs.OpenWriteAsync("/a/file.txt", VfsWriteMode.CreateNew));
+
+        Assert.Equal(VfsOperation.Write, ex.Operation);
+        Assert.IsType<IOException>(ex.InnerException, exactMatch: false);
     }
 
     [Fact]

@@ -15,6 +15,17 @@ namespace Dytools.VirtualFileSystem.Catalog;
 /// Reused by dedupe today and, by design, by future encryption / cache / hard-link
 /// nodes. Implementations must be safe for concurrent use.
 /// </para>
+/// <para>
+/// <b>Exceptions.</b> This is the one boundary the library does not own - an implementation may sit
+/// on EF, a document store, or the filesystem, and the library cannot classify a <c>SqlException</c>
+/// it has no reference to. So the obligation is on the implementer: signal a failure the caller
+/// could reasonably retry - a deadlock, a connection reset, a throttled database - by throwing
+/// <see cref="VfsTransientException"/>. Anything else that escapes a catalog call is wrapped by the
+/// calling node as a real <see cref="VfsException"/> with
+/// <see cref="VfsFailureOrigin.Catalog"/> and the original preserved as the inner exception, which
+/// is the safe default: an unclassified failure surfaces instead of being retried forever.
+/// <see cref="OperationCanceledException"/> should be left to propagate untouched.
+/// </para>
 /// </remarks>
 public interface IVfsCatalog : INodeCapability
 {

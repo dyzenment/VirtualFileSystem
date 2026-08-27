@@ -80,7 +80,8 @@ public sealed class MiddlewareTests
         node.StoreSymlink("b.lnk", "/s/a.lnk");
 
         var vfs = VfsFactory.Build(b => b.Mount("/s", node).UseSymlinks());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => vfs.OpenReadAsync("/s/a.lnk"));
+        var ex = await Assert.ThrowsAsync<VfsException>(() => vfs.OpenReadAsync("/s/a.lnk"));
+        Assert.Equal(VfsFailureReason.InvalidPath, ex.Reason);
     }
 
     [Fact]

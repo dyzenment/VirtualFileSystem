@@ -120,7 +120,15 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         try
         {
             if (_driveId is not null) return;
-            var id = await ResolveDriveIdAsync(ct);
+
+            string id;
+            try { id = await ResolveDriveIdAsync(ct); }
+            catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+            {
+                // No path yet - this fails before any entry is addressed.
+                throw GraphErrors.Transport(ex, VfsOperation.Resolve, null, null, ct);
+            }
+
             _logger?.LogWarning(
                 "Resolved the SharePoint drive id for site '{Site}'{Library} to '{DriveId}'. To skip this "
                 + "lookup on every start, switch the mount to UseSharePointDrive(\"{DriveId}\").",
@@ -133,19 +141,24 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     private async Task<string> ResolveDriveIdAsync(CancellationToken ct)
     {
         var site   = await _http.GetFromJsonAsync<GraphSite>($"sites/{_sitePath}?$select=id", Json, ct);
-        var siteId = site?.Id ?? throw new IOException($"Could not resolve SharePoint site '{_sitePath}'.");
+        var siteId = site?.Id ?? throw new VfsException(
+            VfsFailureReason.NotFound, VfsOperation.Resolve,
+            message: $"Could not resolve SharePoint site '{_sitePath}'.");
 
         if (string.IsNullOrEmpty(_libraryName))
         {
             var drive = await _http.GetFromJsonAsync<GraphDrive>($"sites/{siteId}/drive?$select=id", Json, ct);
-            return drive?.Id ?? throw new IOException($"Site '{_sitePath}' has no default document library.");
+            return drive?.Id ?? throw new VfsException(
+                VfsFailureReason.NotFound, VfsOperation.Resolve,
+                message: $"Site '{_sitePath}' has no default document library.");
         }
 
         var page  = await _http.GetFromJsonAsync<GraphDriveCollection>($"sites/{siteId}/drives?$select=id,name", Json, ct);
         var match = page?.Value?.FirstOrDefault(d => string.Equals(d.Name, _libraryName, StringComparison.OrdinalIgnoreCase));
-        return match?.Id ?? throw new IOException(
-            $"Document library '{_libraryName}' not found on site '{_sitePath}'. Available: "
-            + $"{string.Join(", ", page?.Value?.Select(d => d.Name) ?? Enumerable.Empty<string?>())}.");
+        return match?.Id ?? throw new VfsException(
+            VfsFailureReason.NotFound, VfsOperation.Resolve,
+            message: $"Document library '{_libraryName}' not found on site '{_sitePath}'. Available: "
+                + $"{string.Join(", ", page?.Value?.Select(d => d.Name) ?? Enumerable.Empty<string?>())}.");
     }
 
     // Graph addresses a site as "{hostname}:/{server-relative-path}" (or just "{hostname}" for the
@@ -173,17 +186,33 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     public override async Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
-        var resp = await _http.GetAsync(
-            ItemUrl(DrivePath(Rel(request)), "/content"), HttpCompletionOption.ResponseHeadersRead, ct);
+
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await _http.GetAsync(
+                ItemUrl(DrivePath(Rel(request)), "/content"), HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+        {
+            throw Graph(ex, VfsOperation.Read, request, ct);
+        }
+
         if (resp.StatusCode == HttpStatusCode.NotFound)
         {
             resp.Dispose();
-            if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);   // reconcile a stale entry
+            // Reconcile a stale entry: absence is an answer here, not a failure.
+            await MirrorAsync(m => m.RemoveAsync(request.Path, ct), VfsOperation.Read, request, ct);
             return null;
         }
-        resp.EnsureSuccessStatusCode();
-        if (_mirror is not null) await _mirror.TouchAccessedAsync(request.Path, DateTimeOffset.UtcNow, ct);
-        return await resp.Content.ReadAsStreamAsync(ct);
+
+        await EnsureOkAsync(resp, VfsOperation.Read, request, ct);
+        await MirrorAsync(m => m.TouchAccessedAsync(request.Path, DateTimeOffset.UtcNow, ct), VfsOperation.Read, request, ct);
+
+        // The stream itself is NOT guarded: a connection dropped mid-read still throws the
+        // backend's own exception. Closing that gap needs a mapping Stream decorator.
+        try { return await resp.Content.ReadAsStreamAsync(ct); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.Read, request, ct); }
     }
 
     // -- Write -----------------------------------------------------------------
@@ -203,7 +232,11 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         if (options.Mode == VfsWriteMode.Append)
             throw new NotSupportedException(
                 "SharePoint items cannot be appended to; rewrite the whole item instead.");
-        return Task.FromResult<Stream>(new SharePointUploadStream(this, DrivePath(Rel(request)), options));
+
+        // The upload happens on close, outside every method the pipeline guards, so the stream has
+        // to carry the VFS path with it - by then the request is long gone.
+        return Task.FromResult<Stream>(new SharePointUploadStream(
+            this, DrivePath(Rel(request)), options, VfsFailure.FullPath(request), VfsFailure.MountOf(request)));
     }
 
     // Graph accepts full ISO 8601; the round-trip format on a UTC DateTime gives exactly that.
@@ -223,29 +256,42 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
     // Called by SharePointUploadStream on close: pick single-PUT vs chunked upload session, then
     // fold the resulting item into the catalog.
-    internal async Task CommitUploadAsync(string drivePath, FileStream temp, VfsWriteOptions options)
+    internal async Task CommitUploadAsync(
+        string drivePath, FileStream temp, VfsWriteOptions options, string? vfsPath, string? mount)
     {
         await EnsureDriveIdAsync(CancellationToken.None);
         await temp.FlushAsync();
         temp.Position = 0;
         var conflict = options.Mode == VfsWriteMode.CreateNew ? "fail" : "replace";
 
-        var item = temp.Length < SmallUploadLimit
-            ? await UploadSmallAsync(drivePath, temp, conflict, options)
-            : await UploadLargeAsync(drivePath, temp, conflict, options);
+        DriveItem? item;
+        try
+        {
+            item = temp.Length < SmallUploadLimit
+                ? await UploadSmallAsync(drivePath, temp, conflict, options, vfsPath, mount)
+                : await UploadLargeAsync(drivePath, temp, conflict, options, vfsPath, mount);
+        }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, CancellationToken.None))
+        {
+            throw GraphErrors.Transport(ex, VfsOperation.Write, vfsPath, mount, CancellationToken.None);
+        }
 
-        if (_mirror is not null && item is not null && StripRoot(drivePath) is { } mountRel)
-            await _mirror.UpsertAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None);
+        if (item is not null && StripRoot(drivePath) is { } mountRel)
+            await MirrorAsync(
+                m => m.UpsertAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None),
+                VfsOperation.Write, vfsPath, mount, CancellationToken.None);
     }
 
     private async Task<DriveItem?> UploadSmallAsync(
-        string drivePath, Stream content, string conflict, VfsWriteOptions options)
+        string drivePath, Stream content, string conflict, VfsWriteOptions options, string? vfsPath, string? mount)
     {
         var url  = ItemUrl(drivePath, $"/content?@microsoft.graph.conflictBehavior={conflict}");
         var resp = await _http.PutAsync(url, new StreamContent(content));
         if (conflict == "fail" && resp.StatusCode == HttpStatusCode.Conflict)
-            throw new IOException($"SharePoint item already exists: {drivePath}");
-        resp.EnsureSuccessStatusCode();
+            throw new VfsException(
+                VfsFailureReason.Conflict, VfsOperation.Write, vfsPath, mount,
+                $"SharePoint item already exists: {drivePath}");
+        await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
         var item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
 
         // A raw PUT to /content carries no metadata, so requested timestamps need a follow-up PATCH.
@@ -257,7 +303,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
                 Content = JsonContent.Create(new { fileSystemInfo = facet }, options: Json),
             };
             using var patched = await _http.SendAsync(patch);
-            patched.EnsureSuccessStatusCode();
+            await patched.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
             item = await patched.Content.ReadFromJsonAsync<DriveItem>(Json) ?? item;
         }
 
@@ -265,16 +311,18 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     }
 
     private async Task<DriveItem?> UploadLargeAsync(
-        string drivePath, Stream content, string conflict, VfsWriteOptions options)
+        string drivePath, Stream content, string conflict, VfsWriteOptions options, string? vfsPath, string? mount)
     {
         // The session's item body already travels with the request, so timestamps ride along free here.
         var item0 = new Dictionary<string, object> { ["@microsoft.graph.conflictBehavior"] = conflict };
         if (FileSystemInfoBody(options) is { } facet) item0["fileSystemInfo"] = facet;
         var body    = new { item = item0 };
         var create  = await _http.PostAsJsonAsync(ItemUrl(drivePath, "/createUploadSession"), body, Json);
-        create.EnsureSuccessStatusCode();
+        await create.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
         var session = await create.Content.ReadFromJsonAsync<UploadSession>(Json);
-        var uploadUrl = session?.UploadUrl ?? throw new IOException("Graph did not return an upload URL.");
+        var uploadUrl = session?.UploadUrl ?? throw new VfsException(
+            VfsFailureReason.Unknown, VfsOperation.Write, vfsPath, mount,
+            "Graph did not return an upload URL.");
 
         var total  = content.Length;
         var buffer = new byte[ChunkSize];
@@ -289,7 +337,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             // The upload URL is pre-authenticated - send it without the bearer.
             using var req  = new HttpRequestMessage(HttpMethod.Put, uploadUrl) { Content = chunk };
             using var resp = await PlainHttp.SendAsync(req);
-            resp.EnsureSuccessStatusCode();
+            await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
             if (resp.StatusCode is HttpStatusCode.OK or HttpStatusCode.Created)
                 result = await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
             offset += read;
@@ -314,18 +362,29 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         (options ?? VfsDeleteOptions.Default).ResolveRecycle(available: true, request.Path);
 
         await EnsureDriveIdAsync(ct);
-        var resp = await _http.DeleteAsync(ItemUrl(DrivePath(Rel(request))), ct);
-        if (resp.StatusCode != HttpStatusCode.NotFound) resp.EnsureSuccessStatusCode();
-        if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
+
+        HttpResponseMessage resp;
+        try { resp = await _http.DeleteAsync(ItemUrl(DrivePath(Rel(request))), ct); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.Delete, request, ct); }
+
+        // Already gone is a no-op, so 404 is not a failure here.
+        if (resp.StatusCode != HttpStatusCode.NotFound)
+            await EnsureOkAsync(resp, VfsOperation.Delete, request, ct);
+
+        await MirrorAsync(m => m.RemoveAsync(request.Path, ct), VfsOperation.Delete, request, ct);
     }
 
     /// <summary>Renames the item in place, keeping any mirror in step.</summary>
     public override async Task RenameAsync(VfsNodeRequest src, string newName, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
-        var resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), new { name = newName }, Json, ct);
-        resp.EnsureSuccessStatusCode();
-        if (_mirror is not null) await _mirror.MoveAsync(src.Path, src.Path.WithName(newName), ct);
+
+        HttpResponseMessage resp;
+        try { resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), new { name = newName }, Json, ct); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.Rename, src, ct); }
+
+        await EnsureOkAsync(resp, VfsOperation.Rename, src, ct);
+        await MirrorAsync(m => m.MoveAsync(src.Path, src.Path.WithName(newName), ct), VfsOperation.Rename, src, ct);
     }
 
     /// <summary>Moves (and possibly renames) the item to a new parent, keeping any mirror in step.</summary>
@@ -341,9 +400,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             : $"/drives/{_driveId}/root:/{EscapePath(parent)}";
 
         var body = new { parentReference = new { path = parentRefPath }, name };
-        var resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), body, Json, ct);
-        resp.EnsureSuccessStatusCode();
-        if (_mirror is not null) await _mirror.MoveAsync(src.Path, dst.Path, ct);
+
+        HttpResponseMessage resp;
+        try { resp = await _http.PatchAsJsonAsync(ItemUrl(DrivePath(Rel(src))), body, Json, ct); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.Move, src, ct); }
+
+        await EnsureOkAsync(resp, VfsOperation.Move, src, ct);
+        await MirrorAsync(m => m.MoveAsync(src.Path, dst.Path, ct), VfsOperation.Move, src, ct);
     }
 
     // CopyAsync is intentionally left to the VfsNodeBase stream fallback: Graph's native copy is
@@ -358,18 +421,30 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     public override async Task<VfsNodeInfo?> GetInfoAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
-        var resp = await _http.GetAsync(ItemUrl(DrivePath(Rel(request))), ct);
-        if (resp.StatusCode == HttpStatusCode.NotFound)
+
+        DriveItem? item;
+        try
         {
-            if (_mirror is not null) await _mirror.RemoveAsync(request.Path, ct);
-            return null;
+            var resp = await _http.GetAsync(ItemUrl(DrivePath(Rel(request))), ct);
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                // Reconcile a stale entry: absence is an answer here, not a failure.
+                await MirrorAsync(m => m.RemoveAsync(request.Path, ct), VfsOperation.GetInfo, request, ct);
+                return null;
+            }
+
+            await EnsureOkAsync(resp, VfsOperation.GetInfo, request, ct);
+            item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json, ct);
         }
-        resp.EnsureSuccessStatusCode();
-        var item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json, ct);
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+        {
+            throw Graph(ex, VfsOperation.GetInfo, request, ct);
+        }
+
         if (item is null) return null;
 
         var info = ToNodeInfo(item, request.Path);
-        if (_mirror is not null) await _mirror.UpsertAsync(info, ct);
+        await MirrorAsync(m => m.UpsertAsync(info, ct), VfsOperation.GetInfo, request, ct);
         return info;
     }
 
@@ -383,7 +458,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         VfsNodeRequest request, VfsListOptions options, [EnumeratorCancellation] CancellationToken ct = default)
     {
         await EnsureDriveIdAsync(ct);
-        if (_mirror is not null) await SyncAsync(ct);
+
+        if (_mirror is not null)
+        {
+            try { await SyncAsync(ct); }
+            catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.Sync, request, ct); }
+        }
+
         await foreach (var info in base.ListAsync(request, options ?? VfsListOptions.Default, ct))
             yield return info;
     }
@@ -395,17 +476,33 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // Both branches drive their enumerator by hand: C# forbids a yield return inside a try that
+        // has a catch, so each step is fetched in the try and yielded outside it. Nothing is
+        // buffered, so entries already produced still reach the caller before a failure does.
         if (_mirror is not null)
         {
-            await foreach (var e in _mirror.ListChildrenAsync(request.Path, ct))
-                yield return NodeCatalog.ToNodeInfo(e);
-            yield break;
+            await using var entries = _mirror.ListChildrenAsync(request.Path, ct).GetAsyncEnumerator(ct);
+            while (true)
+            {
+                bool moved;
+                try { moved = await entries.MoveNextAsync(); }
+                catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+                {
+                    throw VfsFailure.Wrap(ex, VfsOperation.List, request, VfsFailureOrigin.Catalog);
+                }
+
+                if (!moved) yield break;
+                yield return NodeCatalog.ToNodeInfo(entries.Current);
+            }
         }
 
         var next = ItemUrl(DrivePath(Rel(request)), "/children");
         while (next is not null)
         {
-            var page = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct);
+            DriveItemPage? page;
+            try { page = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct); }
+            catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct)) { throw Graph(ex, VfsOperation.List, request, ct); }
+
             if (page?.Value is null) yield break;
 
             foreach (var item in page.Value)
@@ -425,7 +522,14 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     /// <inheritdoc/>
     public async Task<SharePointChangeBatch> GetChangesAsync(string? cursor, CancellationToken ct = default)
     {
-        await EnsureDriveIdAsync(ct);
+        try { await EnsureDriveIdAsync(ct); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+        {
+            // The change feed is a node capability, reached outside the pipeline, so there is no
+            // request to name a path from.
+            throw GraphErrors.Transport(ex, VfsOperation.Sync, null, null, ct);
+        }
+
         var changes   = new List<SharePointChange>();
         var newCursor = cursor ?? "";
         await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
@@ -448,7 +552,16 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         var next = startLink ?? $"drives/{_driveId}/root/delta";
         while (next is not null)
         {
-            var page    = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct);
+            // Fetched inside the try, yielded outside it - a yield return cannot sit in a try that
+            // has a catch. A page that fails stops the delta where it is, which is what must happen:
+            // the cursor is only checkpointed for a page that actually applied.
+            DriveItemPage? page;
+            try { page = await _http.GetFromJsonAsync<DriveItemPage>(next, Json, ct); }
+            catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+            {
+                throw GraphErrors.Transport(ex, VfsOperation.Sync, null, null, ct);
+            }
+
             var changes = new List<SharePointChange>();
             if (page?.Value is not null)
                 foreach (var item in page.Value)
@@ -669,6 +782,48 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         _logger?.LogDebug(
             "SharePoint delta: dropping {Count} mirrored row(s) whose item now lives elsewhere.", stale.Count);
         await mirror.RemoveAsync(stale, ct);
+    }
+
+    // -- Failure seams ---------------------------------------------------------
+    //
+    // Layer 1 of the exception contract. Graph fails in two shapes and each has its own seam:
+    // EnsureOkAsync for a response that said no, Graph(...) for a call that never got one.
+
+    // A response that arrived and refused. Stands in for EnsureSuccessStatusCode() everywhere, so
+    // an HttpRequestException is never born and the status is classified while it still means
+    // something. The two path strings are only built on the failure branch.
+    private static async Task EnsureOkAsync(
+        HttpResponseMessage resp, VfsOperation op, VfsNodeRequest request, CancellationToken ct)
+    {
+        if (resp.IsSuccessStatusCode) return;
+        throw await GraphErrors.FromResponseAsync(
+            resp, op, VfsFailure.FullPath(request), VfsFailure.MountOf(request), ct);
+    }
+
+    // A call that never got an answer - dead socket, DNS, TLS, an HttpClient timeout - or one a
+    // helper like GetFromJsonAsync already turned into an HttpRequestException.
+    private static VfsException Graph(Exception ex, VfsOperation op, VfsNodeRequest request, CancellationToken ct)
+        => GraphErrors.Transport(ex, op, VfsFailure.FullPath(request), VfsFailure.MountOf(request), ct);
+
+    // -- Mirror seam -----------------------------------------------------------
+    //
+    // Every mirror call inside an operation goes through here so a catalog failure is reported as
+    // one. Without it the node's own catch would file a catalog outage as a Graph outage, and for a
+    // caching mount that is exactly backwards: the drive is still reachable, only the cache is not.
+    // That bit is what a degradation policy would have to read, so it has to be right even though
+    // nothing degrades yet.
+    private Task MirrorAsync(Func<NodeCatalog, Task> call, VfsOperation op, VfsNodeRequest request, CancellationToken ct)
+        => MirrorAsync(call, op, VfsFailure.FullPath(request), VfsFailure.MountOf(request), ct);
+
+    private async Task MirrorAsync(
+        Func<NodeCatalog, Task> call, VfsOperation op, string? path, string? mount, CancellationToken ct)
+    {
+        if (_mirror is null) return;
+        try { await call(_mirror); }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+        {
+            throw VfsFailure.Wrap(ex, op, path, mount, VfsFailureOrigin.Catalog);
+        }
     }
 
     // -- Helpers ---------------------------------------------------------------

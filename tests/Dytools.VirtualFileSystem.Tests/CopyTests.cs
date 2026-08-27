@@ -90,7 +90,11 @@ public sealed class CopyTests
     public async Task Copy_SourceNotFound_DestinationDoesNotExist()
     {
         var vfs = VfsFactory.CreateDual();
-        await Assert.ThrowsAsync<FileNotFoundException>(
+        var ex  = await Assert.ThrowsAsync<VfsException>(
             () => vfs.CopyAsync("/a/ghost.txt", "/b/ghost.txt"));
+
+        Assert.Equal(VfsFailureReason.NotFound, ex.Reason);
+        Assert.Equal(VfsOperation.Copy, ex.Operation);
+        Assert.Equal("/a/ghost.txt", ex.Path);
     }
 }

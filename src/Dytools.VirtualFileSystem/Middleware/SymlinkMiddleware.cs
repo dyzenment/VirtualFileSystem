@@ -129,9 +129,12 @@ public sealed class SymlinkMiddleware : IVfsMiddleware
         {
             if (!IsSymlinkCapable(ctx.ResolvedNode, ctx.MountPoint)) return;
 
+            // Operation is left Unknown deliberately: resolution fails before any one operation
+            // owns the path, and the pipeline net will not re-wrap what is already a VfsException.
             if (depth >= MaxDepth)
-                throw new InvalidOperationException(
-                    $"Symlink depth limit ({MaxDepth}) exceeded at: {ctx.Path.ToString()}");
+                throw new VfsException(
+                    VfsFailureReason.InvalidPath, path: ctx.Path.ToString(), mount: ctx.MountPoint.ToString(),
+                    message: $"Symlink depth limit ({MaxDepth}) exceeded at: {ctx.Path.ToString()}");
 
             var info = await ctx.ResolvedNode.GetInfoAsync(ctx.BuildNodeRequest(), ct);
             // The node reports symlink-ness as a kind now; the property bag is no longer consulted.

@@ -110,7 +110,9 @@ internal sealed class VfsRerouteNode : VfsNodeBase
         if (req.CallContext is not { } ctx) return;
         var depth = ctx.TryGetValue(DepthKey, out var d) && d is int i ? i : 0;
         if (depth >= DepthLimit)
-            throw new InvalidOperationException("VFS reroute depth limit exceeded (cyclic mount reference?).");
+            throw VfsFailure.Create(
+                VfsFailureReason.InvalidPath, VfsOperation.Unknown, req,
+                "VFS reroute depth limit exceeded (cyclic mount reference?).");
         ctx[DepthKey] = depth + 1;
     }
 }
