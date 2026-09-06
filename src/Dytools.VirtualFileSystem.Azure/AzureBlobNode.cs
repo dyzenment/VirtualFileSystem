@@ -258,7 +258,9 @@ public sealed class AzureBlobNode : VfsNodeBase, IRefreshableCache
         if (_mirror is null) return inner;
         return new MirrorCommitStream(inner, async () =>
         {
-            if (await GetInfoAsync(new VfsNodeRequest(path)) is { } info) await _mirror.UpsertAsync(info);
+            // Runs on stream close, which a caller may reach from a synchronous Dispose.
+            if (await GetInfoAsync(new VfsNodeRequest(path)).ConfigureAwait(false) is { } info)
+                await _mirror.UpsertAsync(info).ConfigureAwait(false);
         });
     }
 
@@ -675,7 +677,9 @@ internal sealed class BlobRewriteStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) CommitAsync().GetAwaiter().GetResult();
+        // A caller who wrote `using` instead of `await using` lands here; VfsCommit keeps that
+        // blocking path from deadlocking against a captured synchronization context.
+        if (disposing) VfsCommit.RunSync(CommitAsync);
         base.Dispose(disposing);
     }
 
@@ -730,7 +734,9 @@ internal sealed class MirrorCommitStream(Stream inner, Func<Task> onClose) : Str
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) CloseAsync().GetAwaiter().GetResult();
+        // A caller who wrote `using` instead of `await using` lands here; VfsCommit keeps that
+        // blocking path from deadlocking against a captured synchronization context.
+        if (disposing) VfsCommit.RunSync(CloseAsync);
         base.Dispose(disposing);
     }
 
@@ -816,11 +822,14 @@ internal sealed class Md5StampingStream(Stream inner, BlobClient blob) : Stream
 
     protected override void Dispose(bool disposing)
     {
+        // Both halves go through one VfsCommit call so the sync path mirrors DisposeAsync above -
+        // commit the blob, then stamp it - without deadlocking against a captured context.
         if (disposing)
-        {
-            inner.Dispose();
-            StampAsync().GetAwaiter().GetResult();
-        }
+            VfsCommit.RunSync(async () =>
+            {
+                await inner.DisposeAsync().ConfigureAwait(false);
+                await StampAsync().ConfigureAwait(false);
+            });
         base.Dispose(disposing);
     }
 

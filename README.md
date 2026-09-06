@@ -151,10 +151,10 @@ Everything is driven through the injected `IVirtualFileSystem`:
 
 | Category | Members |
 |---|---|
-| Streams | `OpenReadAsync`, `OpenWriteAsync` - a bare `VfsWriteMode` or a full `VfsWriteOptions` |
+| Streams | `OpenReadAsync` - with `VfsReadOptions.AsSeekable()` to guarantee a seekable stream over a forward-only backend; `OpenWriteAsync` - a bare `VfsWriteMode` or a full `VfsWriteOptions` |
 | File ops | `CopyAsync`, `MoveAsync`, `RenameAsync`, `DeleteAsync` - with `VfsDeleteOptions` to recycle rather than destroy |
 | Metadata | `ExistsAsync`, `GetInfoAsync`, `ListAsync`, `ListInfoAsync` - with `VfsMetadataOptions` to follow symlinks or not |
-| Extensions | `ReadAsStringAsync`, `WriteStringAsync`, `ReadAllBytesAsync`, `WriteAllBytesAsync`, `SendAsync<T>`, `RetrieveAsync<T>` |
+| Extensions | `WriteAsync(stream)`, `ReadToAsync(stream)`, `ReadAsStringAsync`, `WriteStringAsync`, `ReadAllBytesAsync`, `WriteAllBytesAsync`, `SendAsync<T>`, `RetrieveAsync<T>` - each write takes an optional `VfsWriteOptions` |
 | Scoping | `ScopeTo(path)` - a sub-rooted view; `Mount` / `Unmount` (instance-scoped) |
 | Capabilities | `GetEntryCapability<T>(path)` and `GetNodeCapability<T>(path)` - opt-in behaviour a node may expose |
 

@@ -1,8 +1,8 @@
 namespace Dytools.VirtualFileSystem;
 
 /// <summary>
-/// Base for the per-operation options records (<see cref="VfsListOptions"/>,
-/// <see cref="VfsWriteOptions"/>, <see cref="VfsMetadataOptions"/>).
+/// Base for the per-operation options records (<see cref="VfsReadOptions"/>,
+/// <see cref="VfsListOptions"/>, <see cref="VfsWriteOptions"/>, <see cref="VfsMetadataOptions"/>).
 /// <para>
 /// Exists so <see cref="VfsContext"/> can carry whichever options the current call needs in a single
 /// reference slot. Only one operation is ever in flight on a context, so a field per operation type

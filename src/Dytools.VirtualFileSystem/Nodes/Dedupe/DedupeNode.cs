@@ -139,24 +139,29 @@ public sealed class DedupeNode : VfsNodeBase
     internal async Task CommitWriteAsync(
         VfsPath path, FileStream temp, DateTimeOffset createdAt, DateTimeOffset? modifiedAt = null)
     {
-        await temp.FlushAsync();
+        await temp.FlushAsync().ConfigureAwait(false);
         var size = temp.Length;
 
         temp.Position = 0;
-        var hash = await HashAsync(temp);
+        var hash = await HashAsync(temp).ConfigureAwait(false);
 
         // Dedup keys on the hash: reuse the storage key already assigned to this content.
-        var contentId = await _catalog.FindContentIdByHashAsync(hash);
+        var contentId = await _catalog.FindContentIdByHashAsync(hash).ConfigureAwait(false);
         if (contentId is null)
         {
             // New content - pick its storage key (the hash, or a readable file name),
             // then store the blob under it.
-            contentId = _options.ReadableBlobNames ? await AllocateReadableIdAsync(path) : hash;
-            if (!await _inner.ExistsAsync(BlobReq(BlobPath(contentId))))
+            contentId = _options.ReadableBlobNames
+                ? await AllocateReadableIdAsync(path).ConfigureAwait(false)
+                : hash;
+            if (!await _inner.ExistsAsync(BlobReq(BlobPath(contentId))).ConfigureAwait(false))
             {
                 temp.Position = 0;
-                await using var w = await _inner.OpenWriteAsync(BlobReq(BlobPath(contentId)), VfsWriteMode.Create);
-                await temp.CopyToAsync(w);
+                var w = await _inner.OpenWriteAsync(BlobReq(BlobPath(contentId)), VfsWriteMode.Create)
+                                    .ConfigureAwait(false);
+                // Disposing the inner stream is what commits the blob, so that await is configured too.
+                await using (w.ConfigureAwait(false))
+                    await temp.CopyToAsync(w).ConfigureAwait(false);
             }
         }
 
@@ -172,11 +177,12 @@ public sealed class DedupeNode : VfsNodeBase
             Size        = size,
             CreatedAt   = createdAt,
             ModifiedAt  = now,
-        });
+        }).ConfigureAwait(false);
 
         // GC the blob the path used to reference, if nothing else points at it now.
-        if (prev?.ContentId is { } old && old != contentId && await _catalog.ReferenceCountAsync(old) == 0)
-            await _inner.DeleteAsync(BlobReq(BlobPath(old)), VfsDeleteOptions.Default);
+        if (prev?.ContentId is { } old && old != contentId
+            && await _catalog.ReferenceCountAsync(old).ConfigureAwait(false) == 0)
+            await _inner.DeleteAsync(BlobReq(BlobPath(old)), VfsDeleteOptions.Default).ConfigureAwait(false);
     }
 
     // Derives a readable storage key from the file name, bumping "-N" until it is unique
@@ -188,7 +194,7 @@ public sealed class DedupeNode : VfsNodeBase
 
         var candidate = leaf;
         var seq = 1;
-        while (await _catalog.ReferenceCountAsync(candidate) > 0)
+        while (await _catalog.ReferenceCountAsync(candidate).ConfigureAwait(false) > 0)
             candidate = WithSequence(leaf, ++seq);
         return candidate;
     }
@@ -360,7 +366,7 @@ public sealed class DedupeNode : VfsNodeBase
         try
         {
             int n;
-            while ((n = await content.ReadAsync(buffer)) > 0)
+            while ((n = await content.ReadAsync(buffer).ConfigureAwait(false)) > 0)
                 hash.Append(buffer.AsSpan(0, n));
             return hash.Complete();
         }

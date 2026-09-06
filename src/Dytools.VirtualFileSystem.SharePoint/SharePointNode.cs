@@ -116,13 +116,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     private async Task EnsureDriveIdAsync(CancellationToken ct)
     {
         if (_driveId is not null) return;
-        await _driveIdGate.WaitAsync(ct);
+        await _driveIdGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             if (_driveId is not null) return;
 
             string id;
-            try { id = await ResolveDriveIdAsync(ct); }
+            try { id = await ResolveDriveIdAsync(ct).ConfigureAwait(false); }
             catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
             {
                 // No path yet - this fails before any entry is addressed.
@@ -140,20 +140,23 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
     private async Task<string> ResolveDriveIdAsync(CancellationToken ct)
     {
-        var site   = await _http.GetFromJsonAsync<GraphSite>($"sites/{_sitePath}?$select=id", Json, ct);
+        var site   = await _http.GetFromJsonAsync<GraphSite>($"sites/{_sitePath}?$select=id", Json, ct)
+                               .ConfigureAwait(false);
         var siteId = site?.Id ?? throw new VfsException(
             VfsFailureReason.NotFound, VfsOperation.Resolve,
             message: $"Could not resolve SharePoint site '{_sitePath}'.");
 
         if (string.IsNullOrEmpty(_libraryName))
         {
-            var drive = await _http.GetFromJsonAsync<GraphDrive>($"sites/{siteId}/drive?$select=id", Json, ct);
+            var drive = await _http.GetFromJsonAsync<GraphDrive>($"sites/{siteId}/drive?$select=id", Json, ct)
+                                   .ConfigureAwait(false);
             return drive?.Id ?? throw new VfsException(
                 VfsFailureReason.NotFound, VfsOperation.Resolve,
                 message: $"Site '{_sitePath}' has no default document library.");
         }
 
-        var page  = await _http.GetFromJsonAsync<GraphDriveCollection>($"sites/{siteId}/drives?$select=id,name", Json, ct);
+        var page  = await _http.GetFromJsonAsync<GraphDriveCollection>($"sites/{siteId}/drives?$select=id,name", Json, ct)
+                               .ConfigureAwait(false);
         var match = page?.Value?.FirstOrDefault(d => string.Equals(d.Name, _libraryName, StringComparison.OrdinalIgnoreCase));
         return match?.Id ?? throw new VfsException(
             VfsFailureReason.NotFound, VfsOperation.Resolve,
@@ -259,8 +262,8 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     internal async Task CommitUploadAsync(
         string drivePath, FileStream temp, VfsWriteOptions options, string? vfsPath, string? mount)
     {
-        await EnsureDriveIdAsync(CancellationToken.None);
-        await temp.FlushAsync();
+        await EnsureDriveIdAsync(CancellationToken.None).ConfigureAwait(false);
+        await temp.FlushAsync().ConfigureAwait(false);
         temp.Position = 0;
         var conflict = options.Mode == VfsWriteMode.CreateNew ? "fail" : "replace";
 
@@ -268,8 +271,8 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         try
         {
             item = temp.Length < SmallUploadLimit
-                ? await UploadSmallAsync(drivePath, temp, conflict, options, vfsPath, mount)
-                : await UploadLargeAsync(drivePath, temp, conflict, options, vfsPath, mount);
+                ? await UploadSmallAsync(drivePath, temp, conflict, options, vfsPath, mount).ConfigureAwait(false)
+                : await UploadLargeAsync(drivePath, temp, conflict, options, vfsPath, mount).ConfigureAwait(false);
         }
         catch (Exception ex) when (VfsFailure.ShouldWrap(ex, CancellationToken.None))
         {
@@ -279,20 +282,20 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         if (item is not null && StripRoot(drivePath) is { } mountRel)
             await MirrorAsync(
                 m => m.UpsertAsync(ToNodeInfo(item, VfsPath.From(mountRel)), CancellationToken.None),
-                VfsOperation.Write, vfsPath, mount, CancellationToken.None);
+                VfsOperation.Write, vfsPath, mount, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task<DriveItem?> UploadSmallAsync(
         string drivePath, Stream content, string conflict, VfsWriteOptions options, string? vfsPath, string? mount)
     {
         var url  = ItemUrl(drivePath, $"/content?@microsoft.graph.conflictBehavior={conflict}");
-        var resp = await _http.PutAsync(url, new StreamContent(content));
+        var resp = await _http.PutAsync(url, new StreamContent(content)).ConfigureAwait(false);
         if (conflict == "fail" && resp.StatusCode == HttpStatusCode.Conflict)
             throw new VfsException(
                 VfsFailureReason.Conflict, VfsOperation.Write, vfsPath, mount,
                 $"SharePoint item already exists: {drivePath}");
-        await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
-        var item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
+        await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None).ConfigureAwait(false);
+        var item = await resp.Content.ReadFromJsonAsync<DriveItem>(Json).ConfigureAwait(false);
 
         // A raw PUT to /content carries no metadata, so requested timestamps need a follow-up PATCH.
         // Only paid for when the caller actually asked for them; the chunked path below gets it free.
@@ -302,9 +305,9 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             {
                 Content = JsonContent.Create(new { fileSystemInfo = facet }, options: Json),
             };
-            using var patched = await _http.SendAsync(patch);
-            await patched.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
-            item = await patched.Content.ReadFromJsonAsync<DriveItem>(Json) ?? item;
+            using var patched = await _http.SendAsync(patch).ConfigureAwait(false);
+            await patched.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None).ConfigureAwait(false);
+            item = await patched.Content.ReadFromJsonAsync<DriveItem>(Json).ConfigureAwait(false) ?? item;
         }
 
         return item;
@@ -317,9 +320,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         var item0 = new Dictionary<string, object> { ["@microsoft.graph.conflictBehavior"] = conflict };
         if (FileSystemInfoBody(options) is { } facet) item0["fileSystemInfo"] = facet;
         var body    = new { item = item0 };
-        var create  = await _http.PostAsJsonAsync(ItemUrl(drivePath, "/createUploadSession"), body, Json);
-        await create.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
-        var session = await create.Content.ReadFromJsonAsync<UploadSession>(Json);
+        var create  = await _http.PostAsJsonAsync(ItemUrl(drivePath, "/createUploadSession"), body, Json)
+                                 .ConfigureAwait(false);
+        await create.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None).ConfigureAwait(false);
+        var session = await create.Content.ReadFromJsonAsync<UploadSession>(Json).ConfigureAwait(false);
         var uploadUrl = session?.UploadUrl ?? throw new VfsException(
             VfsFailureReason.Unknown, VfsOperation.Write, vfsPath, mount,
             "Graph did not return an upload URL.");
@@ -330,16 +334,17 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         DriveItem? result = null;
         while (offset < total)
         {
-            var read = await content.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream: false);
+            var read = await content.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream: false)
+                                    .ConfigureAwait(false);
             using var chunk = new ByteArrayContent(buffer, 0, read);
             chunk.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(offset, offset + read - 1, total);
 
             // The upload URL is pre-authenticated - send it without the bearer.
             using var req  = new HttpRequestMessage(HttpMethod.Put, uploadUrl) { Content = chunk };
-            using var resp = await PlainHttp.SendAsync(req);
-            await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None);
+            using var resp = await PlainHttp.SendAsync(req).ConfigureAwait(false);
+            await resp.EnsureOkAsync(VfsOperation.Write, vfsPath, mount, CancellationToken.None).ConfigureAwait(false);
             if (resp.StatusCode is HttpStatusCode.OK or HttpStatusCode.Created)
-                result = await resp.Content.ReadFromJsonAsync<DriveItem>(Json);
+                result = await resp.Content.ReadFromJsonAsync<DriveItem>(Json).ConfigureAwait(false);
             offset += read;
         }
         return result;
@@ -819,7 +824,7 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         Func<NodeCatalog, Task> call, VfsOperation op, string? path, string? mount, CancellationToken ct)
     {
         if (_mirror is null) return;
-        try { await call(_mirror); }
+        try { await call(_mirror).ConfigureAwait(false); }
         catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
         {
             throw VfsFailure.Wrap(ex, op, path, mount, VfsFailureOrigin.Catalog);

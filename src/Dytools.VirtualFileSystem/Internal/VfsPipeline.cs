@@ -121,8 +121,11 @@ internal sealed class VfsPipeline
     // resolution happen before a chain is ever entered, so they keep throwing
     // ArgumentException / InvalidOperationException - which is what a configuration error should be.
 
-    public Task<Stream?> ExecuteReadAsync(VfsContext ctx, CancellationToken ct)
-        => Guard(_readChain, VfsOperation.Read, ctx, ct);
+    public Task<Stream?> ExecuteReadAsync(VfsContext ctx, VfsReadOptions options, CancellationToken ct)
+    {
+        ctx.Operation = options;
+        return Guard(_readChain, VfsOperation.Read, ctx, ct);
+    }
 
     public Task<Stream> ExecuteWriteAsync(VfsContext ctx, VfsWriteOptions options, CancellationToken ct)
     {

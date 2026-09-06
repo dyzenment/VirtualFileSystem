@@ -73,7 +73,15 @@ public interface IVfsNode
 /// <summary>Controls how an existing entry is treated when opening a write stream.</summary>
 public enum VfsWriteMode
 {
-    /// <summary>Truncate any existing content and write from the beginning. Creates the entry if absent.</summary>
+    /// <summary>
+    /// Replaces the entry outright: any existing content is discarded before the first byte is
+    /// written, and the resulting length is exactly what was written - overwriting with fewer bytes
+    /// leaves no tail of the old content behind. Creates the entry if absent.
+    /// <para>
+    /// This is the overwrite mode, and the default. The name mirrors <see cref="FileMode.Create"/>,
+    /// whose semantics it has; it does not mean "create only".
+    /// </para>
+    /// </summary>
     Create,
 
     /// <summary>Seek to the end of any existing content and append. Creates the entry if absent.</summary>

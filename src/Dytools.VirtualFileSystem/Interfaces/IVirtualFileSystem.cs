@@ -28,6 +28,13 @@ public interface IVirtualFileSystem : IAsyncDisposable
     Task<Stream?>   OpenReadAsync(string path, CancellationToken ct = default);
 
     /// <summary>
+    /// Opens a readable stream for the entry, or null when it does not exist. Pass
+    /// <see cref="VfsReadOptions.AsSeekable(long?)"/> to guarantee the result reports
+    /// <see cref="Stream.CanSeek"/> - for a utility that will not accept a forward-only stream.
+    /// </summary>
+    Task<Stream?>   OpenReadAsync(string path, VfsReadOptions? options, CancellationToken ct = default);
+
+    /// <summary>
     /// Opens a writable stream for the entry. A bare <see cref="VfsWriteMode"/> converts implicitly, so
     /// <c>OpenWriteAsync(path, VfsWriteMode.Append)</c> still binds; pass full
     /// <see cref="VfsWriteOptions"/> to also request timestamps on the written entry.
@@ -42,9 +49,12 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// stamped after the final flush, and a catalog or mirror row is written at the same point.
     /// </para>
     /// <para>
-    /// Prefer <c>await using</c>. Where the stream is handed to something that buffers - a
-    /// <c>StreamWriter</c>, a serialiser - flush or dispose that first, since disposing the VFS stream
-    /// is what commits, and anything still sitting in a writer's buffer will not have reached it.
+    /// Prefer <c>await using</c>. Plain <c>using</c> is safe - the synchronous path runs the commit
+    /// through <see cref="VfsCommit.RunSync"/>, so it cannot deadlock against a synchronization
+    /// context - but it blocks the calling thread for the whole upload and cannot be cancelled.
+    /// Where the stream is handed to something that buffers - a <c>StreamWriter</c>, a serialiser -
+    /// flush or dispose that first, since disposing the VFS stream is what commits, and anything
+    /// still sitting in a writer's buffer will not have reached it.
     /// </para>
     /// </remarks>
     Task<Stream>    OpenWriteAsync(string path, VfsWriteOptions? options = null, CancellationToken ct = default);

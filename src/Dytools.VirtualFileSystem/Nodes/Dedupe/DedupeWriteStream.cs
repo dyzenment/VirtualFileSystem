@@ -33,7 +33,9 @@ internal sealed class DedupeWriteStream(
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) CommitAsync().GetAwaiter().GetResult();
+        // A caller who wrote `using` instead of `await using` lands here; VfsCommit keeps that
+        // blocking path from deadlocking against a captured synchronization context.
+        if (disposing) VfsCommit.RunSync(CommitAsync);
         base.Dispose(disposing);
     }
 

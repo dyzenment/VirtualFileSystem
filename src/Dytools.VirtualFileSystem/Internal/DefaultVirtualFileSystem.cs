@@ -70,7 +70,19 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
     // -- Streams ---------------------------------------------------------------
 
     public Task<Stream?> OpenReadAsync(string path, CancellationToken ct = default)
-        => _pipeline.ExecuteReadAsync(Ctx(path), ct);
+        => OpenReadAsync(path, null, ct);
+
+    // Seekability is applied here rather than in a node because no backend can do it better: a
+    // forward-only HTTP body is forward-only however it is asked for. A node that already hands back
+    // a seekable stream (LocalFs) is left alone, so the guarantee costs nothing where it is free.
+    public async Task<Stream?> OpenReadAsync(string path, VfsReadOptions? options, CancellationToken ct = default)
+    {
+        var opts   = options ?? VfsReadOptions.Default;
+        var stream = await _pipeline.ExecuteReadAsync(Ctx(path), opts, ct);
+
+        if (stream is null || !opts.Seekable || stream.CanSeek) return stream;
+        return new SeekableReadStream(stream, ownsInner: true, opts.MemoryThreshold);
+    }
 
     public Task<Stream> OpenWriteAsync(string path, VfsWriteOptions? options = null, CancellationToken ct = default)
         => _pipeline.ExecuteWriteAsync(Ctx(path), options ?? VfsWriteOptions.Default, ct);

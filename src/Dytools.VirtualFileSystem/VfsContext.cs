@@ -90,6 +90,9 @@ public sealed class VfsContext
     /// </summary>
     public VfsOperationOptions? Operation { get; internal set; }
 
+    /// <summary>Read options when a Read is running, else null.</summary>
+    public VfsReadOptions? ReadOptions => Operation as VfsReadOptions;
+
     /// <summary>Listing options when a List is running, else null.</summary>
     public VfsListOptions? ListOptions => Operation as VfsListOptions;
 
