@@ -35,6 +35,7 @@ application - and your database - deals in one uniform path space:
 /archive   →  S3Node(...)   (add-on)     ├- one path tree, many backends
 /team      →  SharePointNode(...)        │   store "/team/reports/q3.pdf"
 /mem       →  InMemoryKvNode()           ┘   in your DB - it just works
+/host      →  LocalFsNode("")            ←  the whole machine, for file pickers
 ```
 
 A path like `/team/reports/q3.pdf` is all your code and your database ever see.

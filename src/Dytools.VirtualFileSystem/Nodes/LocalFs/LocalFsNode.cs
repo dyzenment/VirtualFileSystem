@@ -23,15 +23,45 @@ namespace Dytools.VirtualFileSystem.Nodes.LocalFs;
 /// <code>
 ///   .Mount("/local/c",  sp => new LocalFsNode(@"C:\"))
 ///   .Mount("/tmp",      sp => new LocalFsNode(Path.GetTempPath()))
+///   .Mount("/host",     sp => new LocalFsNode(""))       // the whole machine
 /// </code>
+/// <para>
+/// A root of <c>""</c> or <c>"/"</c> means the whole machine, which is what a file picker needs:
+/// the user can choose anything, and a path that resolves nowhere would otherwise force a copy of a
+/// file onto itself. On Linux and macOS that is just a node rooted at "/". On Windows, which has no
+/// single root, the first path segment names the volume - <c>/host/c/Users/mike</c> is
+/// <c>C:\Users\mike</c>, and <c>/host/unc/server/share</c> is <c>\\server\share</c>. Listing the
+/// mount root then yields the volumes.
+/// </para>
+/// <para>
+/// Whole-machine roots have no containment to enforce, so mount one where the process already has
+/// the user's authority - a desktop app behind a picker - and prefer directory-rooted mounts, which
+/// also rank ahead of it, for the places a service should be confined to.
+/// </para>
 /// </remarks>
 public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : VfsNodeBase, ILocalPathMapping
 {
-    private readonly string _root = Path.GetFullPath(rootPath);
+    // "" and "/" mean the whole machine. Unix has one filesystem root, so that is simply a node
+    // rooted at "/" and nothing else changes. Windows has no single root, so the node grows a volume
+    // tier instead: the first path segment names the volume ("c/Users/mike" is "C:\Users\mike").
+    private readonly bool _volumeTiered = IsWholeMachine(rootPath) && OperatingSystem.IsWindows();
+
+    private readonly string _root = ResolveRoot(rootPath);
 
     // _root with a trailing separator, so a containment check lands on a segment boundary: without
     // it, root "/data/app" would accept "/data/apple/secret" as being inside itself.
-    private readonly string _rootPrefix = WithTrailingSeparator(Path.GetFullPath(rootPath));
+    private readonly string _rootPrefix = WithTrailingSeparator(ResolveRoot(rootPath));
+
+    /// <summary>Whether this node is rooted at the whole machine rather than one directory.</summary>
+    public bool IsWholeMachineRoot => _volumeTiered || _root == "/";
+
+    private static bool IsWholeMachine(string rootPath)
+        => string.IsNullOrEmpty(rootPath) || rootPath == "/" || rootPath == "\\";
+
+    private static string ResolveRoot(string rootPath)
+        => IsWholeMachine(rootPath)
+            ? (OperatingSystem.IsWindows() ? string.Empty : "/")   // empty: the volume tier has no single root
+            : Path.GetFullPath(rootPath);
 
     // Windows and macOS are case-insensitive by default, everything else sensitive - a guess the
     // caller can override, since only the filesystem really knows. One value drives all three places
@@ -46,7 +76,9 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
         => _caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
     private static string WithTrailingSeparator(string path)
-        => path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar;
+        => path.Length == 0 || path.EndsWith(Path.DirectorySeparatorChar)
+            ? path
+            : path + Path.DirectorySeparatorChar;
 
     // The OS bin for the running platform. Swappable so tests can drive the delete paths without
     // putting anything in the developer's real Trash.
@@ -211,6 +243,13 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         options ??= VfsListOptions.Default;
+
+        if (AtVolumeTierRoot(request))
+        {
+            foreach (var volume in VolumeEntries(options)) yield return volume;
+            yield break;
+        }
+
         var physical = Resolve(request);
         if (!Directory.Exists(physical)) yield break;
 
@@ -260,6 +299,12 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
     protected override async IAsyncEnumerable<VfsNodeInfo> ListDirectoryAsync(
         VfsNodeRequest request, [EnumeratorCancellation] CancellationToken ct = default)
     {
+        if (AtVolumeTierRoot(request))
+        {
+            foreach (var volume in VolumeEntries(VfsListOptions.Default)) yield return volume;
+            yield break;
+        }
+
         var physical = Resolve(request);
         if (!Directory.Exists(physical)) yield break;
 
@@ -309,6 +354,8 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
     /// <inheritdoc/>
     public override Task<bool> ExistsAsync(VfsNodeRequest request, CancellationToken ct = default)
     {
+        if (AtVolumeTierRoot(request)) return Task.FromResult(true);
+
         var physical = Resolve(request);
         return Task.FromResult(File.Exists(physical) || Directory.Exists(physical));
     }
@@ -320,7 +367,9 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
     // FileStream on Windows supports ADS natively. On Linux this will fail at the OS level.
     private string Resolve(VfsNodeRequest request)
     {
-        var combined = ToHostPath(request.Path);
+        var combined = ToHostPath(request.Path)
+            ?? throw new DirectoryNotFoundException(
+                $"'{request.Path}' does not name a volume on this machine.");
 
         if (!IsInsideRoot(combined))
             throw new UnauthorizedAccessException(
@@ -334,6 +383,10 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
 
     private VfsNodeInfo? GetInfoInternal(VfsNodeRequest request)
     {
+        // The volume tier is a real place with no host path of its own - it is the set of volumes.
+        if (AtVolumeTierRoot(request))
+            return new VfsNodeInfo { RelativePath = default, IsFile = false, IsDirectory = true };
+
         var physical = Resolve(request);
 
         if (File.Exists(physical))
@@ -394,16 +447,21 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
     // (with casing as it actually exists on disk).
     private VfsPath BuildRelativePath(string physicalAbsolute)
     {
+        if (_volumeTiered)
+            return LocalFsVolumes.TryToRelative(physicalAbsolute, out var v) ? VfsPath.From(v) : default;
+
         var rel = physicalAbsolute[_root.Length..]
             .TrimStart(Path.DirectorySeparatorChar)
             .Replace(Path.DirectorySeparatorChar, '/');
         return VfsPath.From(rel);
     }
 
-    // Mount-relative VFS path -> absolute host path. No containment check: callers decide whether
-    // an escape throws (an operation) or returns null (a query).
-    private string ToHostPath(VfsPath relativePath)
+    // Mount-relative VFS path -> absolute host path, or null when there is nowhere for it to be.
+    // No containment check: callers decide whether an escape throws (an operation) or answers null.
+    private string? ToHostPath(VfsPath relativePath)
     {
+        if (_volumeTiered) return LocalFsVolumes.ToHostPath(relativePath.PathSpan);
+
         var relSpan = relativePath.PathSpan;
         Span<char> buf = stackalloc char[relSpan.Length + 1];
         for (int i = 0; i < relSpan.Length; i++)
@@ -422,7 +480,7 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
     public string? ToLocalPath(VfsPath relativePath)
     {
         var combined = ToHostPath(relativePath);
-        return IsInsideRoot(combined) ? combined : null;
+        return combined is not null && IsInsideRoot(combined) ? combined : null;
     }
 
     /// <inheritdoc/>
@@ -434,8 +492,19 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
         // GetFullPath is what makes this safe for paths that came from outside - a picker, a command
         // line - rather than through VfsPath: it resolves "..", "\\?\" and UNC forms up front, so the
         // comparison below is against a canonical path.
+        // An extended-length prefix is stripped first: a picker hands "\\?\C:\..." back for a long
+        // path, and nothing downstream understands it.
+        var candidate = LocalFsVolumes.StripExtendedPrefix(localPath);
+
+        if (_volumeTiered)
+        {
+            if (!LocalFsVolumes.TryToRelative(candidate, out var volumeRelative)) return false;
+            relativePath = VfsPath.From(volumeRelative);
+            return true;
+        }
+
         string full;
-        try   { full = Path.GetFullPath(localPath); }
+        try   { full = Path.GetFullPath(candidate); }
         catch { return false; }                        // malformed - not ours
 
         if (!IsInsideRoot(full)) return false;
@@ -444,9 +513,31 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
         return true;
     }
 
+    // The mount root of a volume-tiered node - "/local" itself, which names the machine rather than
+    // any directory on it.
+    private bool AtVolumeTierRoot(VfsNodeRequest request)
+        => _volumeTiered && request.Path.PathSpan.IsEmpty;
+
+    // The volumes, as the children of the tier root. Not recursed into: descending from here would
+    // walk every volume on the machine, which is never what a caller listing a root meant to ask for.
+    private static IEnumerable<VfsNodeInfo> VolumeEntries(VfsListOptions options)
+    {
+        if ((options.Kind & VfsEntryKind.Directories) == 0) yield break;
+
+        foreach (var segment in LocalFsVolumes.EnumerateVolumeSegments())
+            yield return new VfsNodeInfo
+            {
+                RelativePath = VfsPath.From(segment),
+                IsFile       = false,
+                IsDirectory  = true,
+            };
+    }
+
     // True when an absolute host path is the root itself or sits beneath it, on a segment boundary.
     private bool IsInsideRoot(string absolute)
-        => absolute.Equals(_root, PathComparison) || absolute.StartsWith(_rootPrefix, PathComparison);
+        => _volumeTiered                                    // the volume translation is the check
+        || absolute.Equals(_root, PathComparison)
+        || absolute.StartsWith(_rootPrefix, PathComparison);
 
     private static void EnsureDirectory(string filePath)
     {
