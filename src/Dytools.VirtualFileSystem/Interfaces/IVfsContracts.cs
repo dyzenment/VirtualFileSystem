@@ -21,6 +21,22 @@ public interface IVfsMountRegistry
     void      RemoveAlias(string alias);
 
     /// <summary>
+    /// Every mount visible from this registry, with the internal flag, for walking the table rather
+    /// than resolving a single path - <c>TryGetVfsPath</c> asks every node whether a host path is
+    /// one of its own. A key defined on a child registry hides the same key on its parent, exactly
+    /// as it does when resolving.
+    /// </summary>
+    /// <param name="serviceProvider">
+    /// The caller's ambient scope, used to build scoped/transient-mounted nodes - enumerating
+    /// materialises every node, since the node is what has to answer.
+    /// </param>
+    IEnumerable<(VfsPath MountPoint, IVfsNode Node, bool IsInternal)> EnumerateMounts(
+        IServiceProvider? serviceProvider = null);
+
+    /// <summary>Every alias visible from this registry, with the internal flag.</summary>
+    IEnumerable<(VfsPath Alias, VfsPath Target, bool IsInternal)> EnumerateAliases();
+
+    /// <summary>
     /// Returns the node, the matched mount-point key, and the fully-resolved <see cref="VfsPath"/> (post-alias).
     /// </summary>
     /// <param name="path">The path to resolve.</param>

@@ -22,6 +22,18 @@ public static class VirtualFileSystemExtensions
     // -- Streams ---------------------------------------------------------------
 
     /// <summary>
+    /// Opens a readable stream for the entry, or null when it does not exist.
+    /// <para>
+    /// The options-carrying form is the interface member; this is the plain read. Keeping it out
+    /// here means an implementation writes one method instead of two, and callers still get
+    /// <c>OpenReadAsync(path)</c> and <c>OpenReadAsync(path, ct)</c> unchanged.
+    /// </para>
+    /// </summary>
+    public static Task<Stream?> OpenReadAsync(
+        this IVirtualFileSystem vfs, string path, CancellationToken ct = default)
+        => vfs.OpenReadAsync(path, options: null, ct);
+
+    /// <summary>
     /// Writes everything readable from <paramref name="content"/> as the entry's content, then closes
     /// the VFS stream - which is what commits the write on the staging backends. The source stream is
     /// read to its end from its current position and is left open for the caller to dispose.

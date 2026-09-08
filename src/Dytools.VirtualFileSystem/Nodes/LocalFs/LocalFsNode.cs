@@ -25,9 +25,28 @@ namespace Dytools.VirtualFileSystem.Nodes.LocalFs;
 ///   .Mount("/tmp",      sp => new LocalFsNode(Path.GetTempPath()))
 /// </code>
 /// </remarks>
-public sealed class LocalFsNode(string rootPath) : VfsNodeBase
+public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : VfsNodeBase, ILocalPathMapping
 {
     private readonly string _root = Path.GetFullPath(rootPath);
+
+    // _root with a trailing separator, so a containment check lands on a segment boundary: without
+    // it, root "/data/app" would accept "/data/apple/secret" as being inside itself.
+    private readonly string _rootPrefix = WithTrailingSeparator(Path.GetFullPath(rootPath));
+
+    // Windows and macOS are case-insensitive by default, everything else sensitive - a guess the
+    // caller can override, since only the filesystem really knows. One value drives all three places
+    // that need it: the search-pattern matcher, the containment check, and the host-path mapping.
+    private readonly bool _caseSensitive = caseSensitive
+        ?? !(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS());
+
+    /// <inheritdoc/>
+    protected override bool IsCaseSensitive => _caseSensitive;
+
+    private StringComparison PathComparison
+        => _caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+    private static string WithTrailingSeparator(string path)
+        => path.EndsWith(Path.DirectorySeparatorChar) ? path : path + Path.DirectorySeparatorChar;
 
     // The OS bin for the running platform. Swappable so tests can drive the delete paths without
     // putting anything in the developer's real Trash.
@@ -37,7 +56,8 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     /// Creates a node from mount options. Activated by
     /// <c>MountSingleton</c>/<c>Scoped</c>/<c>Transient&lt;LocalFsNode&gt;</c> from the configured options.
     /// </summary>
-    public LocalFsNode(VfsMountOptions options) : this(options.Require<LocalFsOptions>().RootPath) { }
+    public LocalFsNode(VfsMountOptions options)
+        : this(options.Require<LocalFsOptions>().RootPath, options.Require<LocalFsOptions>().CaseSensitive) { }
 
     /// <inheritdoc/>
     public override Task<Stream?> OpenReadAsync(VfsNodeRequest request, CancellationToken ct = default)
@@ -197,6 +217,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         var pattern       = string.IsNullOrEmpty(options.SearchPattern) ? "*" : options.SearchPattern!;
         var includeHidden = options.IncludeHidden;
         var kind          = options.Kind;
+        var caseSensitiveMatch = _caseSensitive;   // captured: the predicate is a static-context lambda
 
         var enumOptions = new EnumerationOptions
         {
@@ -220,7 +241,8 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
                     : (kind & VfsEntryKind.Files) != 0;
                 if (!kindOk) return false;
                 if (!includeHidden && (e.Attributes & FileAttributes.Hidden) != 0) return false;
-                return pattern == "*" || FileSystemName.MatchesSimpleExpression(pattern, e.FileName);
+                return pattern == "*"
+                    || FileSystemName.MatchesSimpleExpression(pattern, e.FileName, ignoreCase: !caseSensitiveMatch);
             },
         };
 
@@ -258,11 +280,15 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
         var props  = ImmutableDictionary<string, string?>.Empty;
         if (isLink) props = props.Add(VfsPropertyKeys.PhysicalSymlink, "true");
 
-        var target = isLink ? SafeLinkTarget(entry.ToFullPath()) : null;
+        // One materialisation, used three ways - the relative path is a slice of it, and it is
+        // what LocalPath reports. It was already being built here (twice, for a link) and discarded.
+        var fullPath = entry.ToFullPath();
+        var target   = isLink ? SafeLinkTarget(fullPath) : null;
 
         return new VfsNodeInfo
         {
-            RelativePath = BuildRelativePath(entry.ToFullPath()),
+            RelativePath = BuildRelativePath(fullPath),
+            LocalPath    = fullPath,
             IsFile       = !entry.IsDirectory,
             IsDirectory  = entry.IsDirectory,
             IsSymlink    = isLink,
@@ -294,14 +320,9 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
     // FileStream on Windows supports ADS natively. On Linux this will fail at the OS level.
     private string Resolve(VfsNodeRequest request)
     {
-        var relSpan  = request.Path.PathSpan;
-        Span<char> buf = stackalloc char[relSpan.Length + 1];
-        for (int i = 0; i < relSpan.Length; i++)
-            buf[i] = relSpan[i] == '/' ? Path.DirectorySeparatorChar : relSpan[i];
-        var rel      = new string(buf[..relSpan.Length]);
-        var combined = Path.GetFullPath(Path.Combine(_root, rel));
+        var combined = ToHostPath(request.Path);
 
-        if (!combined.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
+        if (!IsInsideRoot(combined))
             throw new UnauthorizedAccessException(
                 $"Path traversal denied: '{request.Path}' escapes mount root '{_root}'.");
 
@@ -325,6 +346,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
             return new VfsNodeInfo
             {
                 RelativePath = BuildRelativePath(fi.FullName),
+                LocalPath    = fi.FullName,
                 IsFile       = true,
                 IsDirectory  = false,
                 IsSymlink    = isLink,
@@ -344,6 +366,7 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
             return new VfsNodeInfo
             {
                 RelativePath = BuildRelativePath(di.FullName),
+                LocalPath    = di.FullName,
                 IsFile       = false,
                 IsDirectory  = true,
                 IsHidden     = (di.Attributes & FileAttributes.Hidden) != 0,
@@ -376,6 +399,54 @@ public sealed class LocalFsNode(string rootPath) : VfsNodeBase
             .Replace(Path.DirectorySeparatorChar, '/');
         return VfsPath.From(rel);
     }
+
+    // Mount-relative VFS path -> absolute host path. No containment check: callers decide whether
+    // an escape throws (an operation) or returns null (a query).
+    private string ToHostPath(VfsPath relativePath)
+    {
+        var relSpan = relativePath.PathSpan;
+        Span<char> buf = stackalloc char[relSpan.Length + 1];
+        for (int i = 0; i < relSpan.Length; i++)
+            buf[i] = relSpan[i] == '/' ? Path.DirectorySeparatorChar : relSpan[i];
+        var rel = new string(buf[..relSpan.Length]);
+        return Path.GetFullPath(Path.Combine(_root, rel));
+    }
+
+    // -- ILocalPathMapping -----------------------------------------------------
+
+    /// <inheritdoc/>
+    public override T? GetNodeCapability<T>(VfsPath mountPoint) where T : class
+        => this as T;
+
+    /// <inheritdoc/>
+    public string? ToLocalPath(VfsPath relativePath)
+    {
+        var combined = ToHostPath(relativePath);
+        return IsInsideRoot(combined) ? combined : null;
+    }
+
+    /// <inheritdoc/>
+    public bool TryGetRelativePath(string localPath, out VfsPath relativePath)
+    {
+        relativePath = default;
+        if (string.IsNullOrEmpty(localPath)) return false;
+
+        // GetFullPath is what makes this safe for paths that came from outside - a picker, a command
+        // line - rather than through VfsPath: it resolves "..", "\\?\" and UNC forms up front, so the
+        // comparison below is against a canonical path.
+        string full;
+        try   { full = Path.GetFullPath(localPath); }
+        catch { return false; }                        // malformed - not ours
+
+        if (!IsInsideRoot(full)) return false;
+
+        relativePath = full.Length == _root.Length ? default : BuildRelativePath(full);
+        return true;
+    }
+
+    // True when an absolute host path is the root itself or sits beneath it, on a segment boundary.
+    private bool IsInsideRoot(string absolute)
+        => absolute.Equals(_root, PathComparison) || absolute.StartsWith(_rootPrefix, PathComparison);
 
     private static void EnsureDirectory(string filePath)
     {

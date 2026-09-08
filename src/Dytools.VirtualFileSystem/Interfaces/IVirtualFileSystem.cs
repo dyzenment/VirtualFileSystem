@@ -24,13 +24,39 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// <summary>Removes an instance-level mount at the given mount point.</summary>
     void Unmount(string mountPoint);
 
-    /// <summary>Opens a readable stream for the entry, or null when it does not exist.</summary>
-    Task<Stream?>   OpenReadAsync(string path, CancellationToken ct = default);
+    // -- Host filesystem interop -----------------------------------------------
+    //
+    // A file picker, a drag-and-drop, a command-line argument and Process.Start all deal in host
+    // paths, and none of them will learn about mount points. These map between the two using what
+    // the mounted nodes report through <see cref="ILocalPathMapping"/> - so the answer is whatever
+    // the mounts actually say, and nothing here assumes a path shape or knows what a drive is.
+
+    /// <summary>
+    /// The best VFS path that reaches <paramref name="localPath"/>, or false when nothing mounted
+    /// covers it - in which case the caller decides what to do (report it, or mount it and retry).
+    /// <para>
+    /// "Best" is the most specific mount covering the path, and never a path that would throw when
+    /// used. Where several routes exist, <see cref="GetVfsPathCandidates"/> returns them all.
+    /// </para>
+    /// </summary>
+    bool TryGetVfsPath(string localPath, out string vfsPath);
+
+    /// <summary>
+    /// Every VFS path that reaches <paramref name="localPath"/>, most specific mount first, each
+    /// labelled with the mount it routes through and the alias it goes via, if any. Empty when
+    /// nothing covers it.
+    /// </summary>
+    IReadOnlyList<VfsPathCandidate> GetVfsPathCandidates(
+        string localPath, VfsPathLookupOptions? options = null);
 
     /// <summary>
     /// Opens a readable stream for the entry, or null when it does not exist. Pass
     /// <see cref="VfsReadOptions.AsSeekable(long?)"/> to guarantee the result reports
     /// <see cref="Stream.CanSeek"/> - for a utility that will not accept a forward-only stream.
+    /// <para>
+    /// The options-free form is an extension on this method rather than a second member, so an
+    /// implementation has one read to write and callers keep <c>OpenReadAsync(path)</c>.
+    /// </para>
     /// </summary>
     Task<Stream?>   OpenReadAsync(string path, VfsReadOptions? options, CancellationToken ct = default);
 

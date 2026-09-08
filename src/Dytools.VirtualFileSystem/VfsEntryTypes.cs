@@ -63,6 +63,18 @@ public sealed record VfsNodeInfo
     /// </summary>
     public          string? SymlinkTarget { get; init; }
 
+    /// <summary>
+    /// The entry's path in the host filesystem, or null when it does not have one.
+    /// <para>
+    /// For handing an entry to something that will not take a VFS path - a file picker's counterpart,
+    /// <c>Process.Start</c>, a native library. Set by nodes backed by the local filesystem, where the
+    /// path already exists as a by-product of resolving the entry; null everywhere else, including
+    /// nodes whose storage happens to sit on disk in a form the path would not describe (a
+    /// content-addressed blob is not the entry).
+    /// </para>
+    /// </summary>
+    public string? LocalPath { get; init; }
+
     /// <summary>Creation time, or null when the node cannot provide it (e.g. S3 has no CreatedAt).</summary>
     public DateTimeOffset? CreatedAt  { get; init; }
     /// <summary>Last-modified time, or null when the node cannot provide it.</summary>
@@ -129,6 +141,18 @@ public sealed record VfsEntryInfo
     /// never by a node. Listings never follow, so this is always false there.
     /// </summary>
     public bool FollowedSymlink { get; init; }
+
+    /// <summary>
+    /// The entry's path in the host filesystem, or null when it does not have one - for handing the
+    /// entry to something that will not take a VFS path (<c>Process.Start</c>, a native library, a
+    /// shell "reveal in folder"). Reported by the node, not derived here: the node is the only thing
+    /// that knows where its storage actually is.
+    /// <para>
+    /// Note that this is the server's own filesystem layout. Do not serialise it to a client that
+    /// should not learn it.
+    /// </para>
+    /// </summary>
+    public string? LocalPath { get; init; }
 
     /// <summary>Creation time, or null when unavailable.</summary>
     public DateTimeOffset? CreatedAt  { get; init; }

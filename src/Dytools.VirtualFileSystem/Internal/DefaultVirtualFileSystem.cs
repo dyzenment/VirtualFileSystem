@@ -67,10 +67,69 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         _localRegistry?.Unmount(mountPoint);
     }
 
-    // -- Streams ---------------------------------------------------------------
+    // -- Host filesystem interop -----------------------------------------------
 
-    public Task<Stream?> OpenReadAsync(string path, CancellationToken ct = default)
-        => OpenReadAsync(path, null, ct);
+    public bool TryGetVfsPath(string localPath, out string vfsPath)
+    {
+        var candidates = GetVfsPathCandidates(localPath);
+        vfsPath = candidates.Count == 0 ? string.Empty : candidates[0].Path;
+        return candidates.Count != 0;
+    }
+
+    public IReadOnlyList<VfsPathCandidate> GetVfsPathCandidates(
+        string localPath, VfsPathLookupOptions? options = null)
+    {
+        var opts = options ?? VfsPathLookupOptions.Default;
+        if (string.IsNullOrEmpty(localPath)) return [];
+
+        var aliases = opts.IncludeAliases
+            ? ActiveRegistry.EnumerateAliases().ToArray()
+            : [];
+
+        var found = new List<(int Rank, VfsPathCandidate Candidate)>();
+
+        foreach (var (mountPoint, node, isInternal) in ActiveRegistry.EnumerateMounts(_ambient))
+        {
+            var mapping = node.GetNodeCapability<ILocalPathMapping>(mountPoint);
+            if (mapping is null || !mapping.TryGetRelativePath(localPath, out var relative)) continue;
+
+            var full     = relative.PathSpan.IsEmpty ? mountPoint : VfsPath.From(mountPoint, relative);
+            var mountStr = mountPoint.ToString();
+
+            // A mount rooted deeper in the host filesystem leaves a shorter relative path, so
+            // shortest-relative is the most specific mount - the rule Resolve uses, run backwards.
+            var rank = relative.PathSpan.Length;
+
+            // The direct path to an internal mount throws when used, so it is not offered unless it
+            // was asked for. Alias routes to the same mount stay, because those do work.
+            if (!isInternal || opts.IncludeInternal)
+                found.Add((rank, new VfsPathCandidate
+                {
+                    Path       = full.ToString(),
+                    MountPoint = mountStr,
+                    IsInternal = isInternal,
+                }));
+
+            foreach (var (alias, target, aliasInternal) in aliases)
+            {
+                if (aliasInternal) continue;          // an internal alias sanctions nothing
+                if (!full.StartsWith(target)) continue;
+
+                found.Add((rank, new VfsPathCandidate
+                {
+                    Path       = VfsPath.Rebase(full, target, alias).ToString(),
+                    MountPoint = mountStr,
+                    ViaAlias   = alias.ToString(),
+                    IsInternal = isInternal,
+                }));
+            }
+        }
+
+        // OrderBy is stable, so within one mount the direct path stays ahead of its alias routes.
+        return found.OrderBy(static x => x.Rank).Select(static x => x.Candidate).ToList();
+    }
+
+    // -- Streams ---------------------------------------------------------------
 
     // Seekability is applied here rather than in a node because no backend can do it better: a
     // forward-only HTTP body is forward-only however it is asked for. A node that already hands back
@@ -219,6 +278,7 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
             IsSymlink       = info.IsSymlink,         // node-reported kind
             SymlinkTarget   = info.SymlinkTarget,
             FollowedSymlink = symlinkFollowed,        // a symlink was followed to get here
+            LocalPath   = info.LocalPath,             // node-reported; null unless it has one
             CreatedAt   = info.CreatedAt,
             ModifiedAt  = info.ModifiedAt,
             AccessedAt  = info.AccessedAt,

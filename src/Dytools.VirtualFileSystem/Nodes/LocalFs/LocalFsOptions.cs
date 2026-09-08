@@ -5,6 +5,18 @@ public sealed class LocalFsOptions
 {
     /// <summary>Absolute local directory the mount is rooted at.</summary>
     public string RootPath { get; set; } = "";
+
+    /// <summary>
+    /// Whether names under this root compare case-sensitively, or null to take the platform default -
+    /// insensitive on Windows and macOS, sensitive elsewhere.
+    /// <para>
+    /// The default is only a guess: APFS can be formatted case-sensitive and Linux can mount a
+    /// case-insensitive filesystem, and only the filesystem itself knows. Set it explicitly when the
+    /// mount root is one of those. It governs search-pattern matching and how the root is compared
+    /// when mapping host paths to VFS paths.
+    /// </para>
+    /// </summary>
+    public bool? CaseSensitive { get; set; }
 }
 
 /// <summary>Mount-options extensions for configuring a LocalFsNode.</summary>

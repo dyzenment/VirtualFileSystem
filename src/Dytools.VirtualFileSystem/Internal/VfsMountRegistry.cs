@@ -113,6 +113,43 @@ internal sealed class VfsMountRegistry : IVfsMountRegistry
         }
     }
 
+    // -- Enumeration -----------------------------------------------------------
+
+    public IEnumerable<(VfsPath MountPoint, IVfsNode Node, bool IsInternal)> EnumerateMounts(
+        IServiceProvider? serviceProvider = null)
+    {
+        var snap = _mounts;
+        foreach (var (key, entry, isInternal) in snap)
+            yield return (key, entry.Resolve(serviceProvider ?? _provider), isInternal);
+
+        if (_parent is null) yield break;
+
+        // A child key shadows the parent's, the same way Resolve stops at the first match.
+        foreach (var inherited in _parent.EnumerateMounts(serviceProvider))
+        {
+            var shadowed = false;
+            foreach (var (key, _, _) in snap)
+                if (key == inherited.MountPoint) { shadowed = true; break; }
+            if (!shadowed) yield return inherited;
+        }
+    }
+
+    public IEnumerable<(VfsPath Alias, VfsPath Target, bool IsInternal)> EnumerateAliases()
+    {
+        var snap = _aliases;
+        foreach (var e in snap) yield return e;
+
+        if (_parent is null) yield break;
+
+        foreach (var inherited in _parent.EnumerateAliases())
+        {
+            var shadowed = false;
+            foreach (var (alias, _, _) in snap)
+                if (alias == inherited.Alias) { shadowed = true; break; }
+            if (!shadowed) yield return inherited;
+        }
+    }
+
     // -- Resolve ---------------------------------------------------------------
 
     public (IVfsNode Node, VfsPath MountPoint, VfsPath ResolvedPath) Resolve(
