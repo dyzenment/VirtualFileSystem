@@ -33,7 +33,11 @@ public interface ILocalPathMapping : INodeCapability
     /// The mount-relative path for a host path, or false when it is not under this node's root.
     /// An exact match on the root itself succeeds with an empty <paramref name="relativePath"/>.
     /// </summary>
-    /// <param name="localPath">An absolute host path. Normalised by the implementation.</param>
+    /// <param name="localPath">
+    /// A fully qualified host path. The implementation may normalise it ("..", mixed separators, an
+    /// extended-length prefix) but must never complete it from the working directory or current
+    /// drive: for a relative or drive-relative path the answer is false, not a guess.
+    /// </param>
     /// <param name="relativePath">The path relative to this node's mount, when it maps.</param>
     bool TryGetRelativePath(string localPath, out VfsPath relativePath);
 }

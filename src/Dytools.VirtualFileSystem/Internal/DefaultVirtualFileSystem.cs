@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Dytools.VirtualFileSystem.Nodes.LocalFs;
 using System.Text.Json;
 
 namespace Dytools.VirtualFileSystem.Internal;
@@ -80,7 +81,20 @@ internal sealed class DefaultVirtualFileSystem : IVirtualFileSystem, IDisposable
         string localPath, VfsPathLookupOptions? options = null)
     {
         var opts = options ?? VfsPathLookupOptions.Default;
-        if (string.IsNullOrEmpty(localPath)) return [];
+
+        // A relative path is a caller error, not a lookup miss: no mount can ever cover it, so a
+        // "false - mount it and retry" answer would send the caller the wrong way. The rule is the
+        // host OS's own - a drive-rooted or UNC path on Windows, a "/"-rooted one elsewhere - and the
+        // process's working directory and current drive never take part.
+        ArgumentException.ThrowIfNullOrEmpty(localPath);
+        if (!Path.IsPathFullyQualified(LocalFsVolumes.StripExtendedPrefix(localPath)))
+            throw new ArgumentException(
+                $"'{localPath}' is not a fully qualified host path. " +
+                (OperatingSystem.IsWindows()
+                    ? @"On Windows a drive-rooted path (C:\...) or a UNC path (\\server\share\...) is required; "
+                    : "A path starting with '/' is required; ") +
+                "relative and drive-relative paths are never resolved against the working directory.",
+                nameof(localPath));
 
         var aliases = opts.IncludeAliases
             ? ActiveRegistry.EnumerateAliases().ToArray()

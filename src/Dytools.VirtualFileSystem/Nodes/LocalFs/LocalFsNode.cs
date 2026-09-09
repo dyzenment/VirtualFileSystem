@@ -489,12 +489,15 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
         relativePath = default;
         if (string.IsNullOrEmpty(localPath)) return false;
 
-        // GetFullPath is what makes this safe for paths that came from outside - a picker, a command
-        // line - rather than through VfsPath: it resolves "..", "\\?\" and UNC forms up front, so the
-        // comparison below is against a canonical path.
         // An extended-length prefix is stripped first: a picker hands "\\?\C:\..." back for a long
         // path, and nothing downstream understands it.
         var candidate = LocalFsVolumes.StripExtendedPrefix(localPath);
+
+        // Only a fully qualified path names a place. Anything else - "docs/x", "\docs\x", "C:docs" -
+        // would be completed from the process's working directory or current drive, and that is
+        // ambient state, not a location. Refuse rather than guess: false here means "not ours", and
+        // it is not anyone's.
+        if (!Path.IsPathFullyQualified(candidate)) return false;
 
         if (_volumeTiered)
         {
@@ -503,6 +506,8 @@ public sealed class LocalFsNode(string rootPath, bool? caseSensitive = null) : V
             return true;
         }
 
+        // GetFullPath on a fully qualified path resolves "." and ".." and mixed separators without
+        // touching the working directory, so the comparison below is against a canonical path.
         string full;
         try   { full = Path.GetFullPath(candidate); }
         catch { return false; }                        // malformed - not ours

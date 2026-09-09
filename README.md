@@ -157,7 +157,7 @@ Everything is driven through the injected `IVirtualFileSystem`:
 | Metadata | `ExistsAsync`, `GetInfoAsync`, `ListAsync`, `ListInfoAsync` - with `VfsMetadataOptions` to follow symlinks or not |
 | Extensions | `WriteAsync(stream)`, `ReadToAsync(stream)`, `ReadAsStringAsync`, `WriteStringAsync`, `ReadAllBytesAsync`, `WriteAllBytesAsync`, `SendAsync<T>`, `RetrieveAsync<T>` - each write takes an optional `VfsWriteOptions` |
 | Scoping | `ScopeTo(path)` - a sub-rooted view; `Mount` / `Unmount` (instance-scoped) |
-| Host interop | `TryGetVfsPath(localPath)`, `GetVfsPathCandidates(...)` (and `VfsEntryInfo.LocalPath` for the other direction) - for file pickers, drag-and-drop and `Process.Start`; driven by what mounted nodes report through `ILocalPathMapping` |
+| Host interop | `TryGetVfsPath(localPath)`, `GetVfsPathCandidates(...)` (and `VfsEntryInfo.LocalPath` for the other direction) - for file pickers, drag-and-drop and `Process.Start`; driven by what mounted nodes report through `ILocalPathMapping`. Input must be fully qualified (drive-rooted or UNC on Windows, `/`-rooted elsewhere); relative input throws rather than being resolved against the working directory |
 | Capabilities | `GetEntryCapability<T>(path)` and `GetNodeCapability<T>(path)` - opt-in behaviour a node may expose |
 
 The convenience members are extension methods rather than interface members: none of them is

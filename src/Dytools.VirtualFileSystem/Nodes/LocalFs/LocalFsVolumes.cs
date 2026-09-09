@@ -66,8 +66,12 @@ internal static class LocalFsVolumes
     }
 
     /// <summary>
-    /// Host path to mount-relative path. Accepts a drive-rooted or UNC path, in either separator
-    /// style, with or without an extended-length prefix. False when it is neither.
+    /// Host path to mount-relative path. Accepts a drive-rooted path ("C:\...") or a UNC path
+    /// ("\\server\share\..."), in either separator style, with or without an extended-length prefix.
+    /// False for anything else - including the drive-relative forms "C:" and "C:folder", which name
+    /// the current directory on that drive rather than a place, and rooted-but-driveless "\folder",
+    /// which Windows would complete from the current drive. Nothing here consults the working
+    /// directory: a path that does not spell out where it lives is not a host path.
     /// </summary>
     internal static bool TryToRelative(string hostPath, out string relative)
     {
@@ -85,10 +89,11 @@ internal static class LocalFsVolumes
             return true;
         }
 
-        // Drive: "C:\rest" -> "c/rest", and bare "C:" or "C:\" -> "c".
-        if (path.Length >= 2 && char.IsAsciiLetter(path[0]) && path[1] == ':')
+        // Drive: "C:\rest" -> "c/rest", and "C:\" -> "c". The separator after the colon is required:
+        // "C:" and "C:rest" are relative to the current directory on C:, which is ambient state.
+        if (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\')
         {
-            var rest = path.Length > 2 ? path[2..].Trim('\\') : string.Empty;
+            var rest = path[3..].Trim('\\');
             var drive = char.ToLowerInvariant(path[0]).ToString();
             relative = rest.Length == 0 ? drive : drive + "/" + rest.Replace('\\', '/');
             return true;

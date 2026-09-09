@@ -31,7 +31,7 @@ public sealed class LocalFsVolumeTests
     [InlineData(@"C:\Users\mike\x.txt",         "c/Users/mike/x.txt")]
     [InlineData(@"c:\Users\mike\x.txt",         "c/Users/mike/x.txt")]
     [InlineData(@"C:\",                         "c")]
-    [InlineData("C:",                           "c")]
+    [InlineData("C:/Users/mike/x.txt",          "c/Users/mike/x.txt")]
     [InlineData(@"\\server\share\f.txt",        "unc/server/share/f.txt")]
     [InlineData(@"\\?\C:\long\path.txt",        "c/long/path.txt")]
     [InlineData(@"\\?\UNC\server\share\f.txt",  "unc/server/share/f.txt")]
@@ -45,6 +45,11 @@ public sealed class LocalFsVolumeTests
     [InlineData("")]
     [InlineData("relative/path.txt")]
     [InlineData(@"\\")]
+    [InlineData("C:")]                  // current directory on C: - ambient, not a place
+    [InlineData(@"C:docs\x.txt")]       // drive-relative, same
+    [InlineData(@"\docs\x.txt")]        // rooted on "the current drive"
+    [InlineData("/docs/x.txt")]         // a VFS path, or a Unix path - not a Windows host path either way
+    [InlineData("DD:\\")]               // two letters is not a drive
     public void TryToRelative_RejectsWhatIsNotAHostPath(string host)
         => Assert.False(LocalFsVolumes.TryToRelative(host, out _));
 

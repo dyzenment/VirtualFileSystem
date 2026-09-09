@@ -38,14 +38,22 @@ public interface IVirtualFileSystem : IAsyncDisposable
     /// "Best" is the most specific mount covering the path, and never a path that would throw when
     /// used. Where several routes exist, <see cref="GetVfsPathCandidates"/> returns them all.
     /// </para>
+    /// <para>
+    /// <paramref name="localPath"/> must be fully qualified: a drive-rooted or UNC path on Windows, a
+    /// "/"-rooted path elsewhere. Anything else throws rather than being completed from the process's
+    /// working directory or current drive - a false here always means "no mount covers it", never
+    /// "the input was not a place".
+    /// </para>
     /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="localPath"/> is empty or not fully qualified.</exception>
     bool TryGetVfsPath(string localPath, out string vfsPath);
 
     /// <summary>
     /// Every VFS path that reaches <paramref name="localPath"/>, most specific mount first, each
     /// labelled with the mount it routes through and the alias it goes via, if any. Empty when
-    /// nothing covers it.
+    /// nothing covers it. Same input rule as <see cref="TryGetVfsPath"/>: fully qualified only.
     /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="localPath"/> is empty or not fully qualified.</exception>
     IReadOnlyList<VfsPathCandidate> GetVfsPathCandidates(
         string localPath, VfsPathLookupOptions? options = null);
 

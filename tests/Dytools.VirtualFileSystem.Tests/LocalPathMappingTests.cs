@@ -87,6 +87,50 @@ public sealed class LocalPathMappingTests : IDisposable
         Assert.False(vfs.TryGetVfsPath(Path.Combine(sibling, "secret.txt"), out _));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("report.pdf")]
+    [InlineData("docs/report.pdf")]
+    [InlineData("./docs/report.pdf")]
+    public void TryGetVfsPath_RelativeInput_ThrowsRatherThanGuessing(string relative)
+    {
+        // A relative path could only be answered by consulting the working directory, which is
+        // ambient state and not a location. The rule is enforced once, before any node is asked.
+        var root = Dir("data");
+        var vfs  = VfsFactory.Build(b => b.Mount("/local", new LocalFsNode(root)));
+
+        Assert.Throws<ArgumentException>(() => vfs.TryGetVfsPath(relative, out _));
+        Assert.Throws<ArgumentException>(() => vfs.GetVfsPathCandidates(relative));
+    }
+
+    [Fact]
+    public void TryGetVfsPath_WindowsRootedWithoutADrive_Throws()
+    {
+        // "\docs\x" is rooted but not qualified: Windows completes it from the current drive.
+        if (!OperatingSystem.IsWindows()) return;
+
+        var root = Dir("data");
+        var vfs  = VfsFactory.Build(b => b.Mount("/local", new LocalFsNode(root)));
+
+        Assert.Throws<ArgumentException>(() => vfs.TryGetVfsPath(@"\docs\report.pdf", out _));
+        Assert.Throws<ArgumentException>(() => vfs.TryGetVfsPath("/docs/report.pdf", out _));
+        Assert.Throws<ArgumentException>(() => vfs.TryGetVfsPath("C:docs", out _));
+    }
+
+    [Fact]
+    public void NodeMapping_RelativeInput_IsNotOurs()
+    {
+        // The node-level answer, for callers that go through ILocalPathMapping directly: false, and
+        // in particular not "the file of that name under the working directory".
+        var root = Dir("data");
+        ILocalPathMapping node = new LocalFsNode(root);
+
+        Assert.False(node.TryGetRelativePath("report.pdf", out _));
+        Assert.False(node.TryGetRelativePath("docs/report.pdf", out _));
+        Assert.True(node.TryGetRelativePath(Path.Combine(root, "docs", "report.pdf"), out var rel));
+        Assert.Equal("docs/report.pdf", rel.ToString());
+    }
+
     [Fact]
     public void TryGetVfsPath_NormalisesTheIncomingPath()
     {
