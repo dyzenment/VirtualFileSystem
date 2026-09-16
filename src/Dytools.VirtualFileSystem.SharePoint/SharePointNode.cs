@@ -772,8 +772,10 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
     // Cross-instance sync gate (sizing is deliberately generous; re-up per page means the TTL only has
     // to cover ONE delta page, not the whole delta).
-    private static readonly TimeSpan SyncTtl           = TimeSpan.FromSeconds(30);   // lease per re-up
-    private static readonly TimeSpan SyncAbortMargin   = TimeSpan.FromSeconds(5);    // winner stops this early
+    // Internal and settable only so tests can shrink them - the same seam NodeCatalog's backoff uses.
+    internal static TimeSpan SyncTtl                   = TimeSpan.FromSeconds(30);   // lease per re-up
+    internal static TimeSpan SyncAbortMargin           = TimeSpan.FromSeconds(5);    // winner stops this early
+    internal static TimeSpan SyncRenewInterval         = TimeSpan.FromSeconds(10);   // re-up cadence during a step with no pages
     private static readonly TimeSpan SyncTakeoverGrace = TimeSpan.FromSeconds(3);    // waiter waits this past expiry
     private static readonly TimeSpan SyncPollInterval  = TimeSpan.FromSeconds(2);
     private const int SyncMaxAttempts = 3;
@@ -842,7 +844,13 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
                     // catalog is not whole.
                     await mirror.SetStateAsync(RebuildingKey, "1", ct);
                     await mirror.ClearStateAsync(CursorKey, ct);
-                    await mirror.ClearAsync(ct);
+                    if (!await ClearKeepingLeaseAsync())
+                    {
+                        _logger?.LogWarning(
+                            "SharePoint mirror for '{Site}': lost the sync lease while clearing the catalog; "
+                            + "the rebuild resumes on the next sync.", site);
+                        return SyncOutcome.Overran;
+                    }
                     _logger?.LogWarning("SharePoint mirror for '{Site}': rebuilding - catalog cleared, re-reading the drive.", site);
                 }
 
@@ -903,6 +911,73 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
                 await mirror.ClearStateAsync(LeaseKey, CancellationToken.None);   // done → waiters serve at once
                 return SyncOutcome.Completed;
+            }
+
+            // The clear has no pages to re-up the lease between, and on a large database-backed mirror it
+            // runs for minutes against a 30-second lease. Left alone the lease lapses mid-clear, which lets
+            // another instance take over and sync into the catalog while it is being emptied - and then the
+            // first page here reads as an overrun. So a renewal loop keeps it alive for as long as the clear
+            // takes, checking each time that it is still ours. False means it was not: someone else holds it
+            // now, so the clear is stopped - it would otherwise go on deleting what they write - and the
+            // rebuild must not go on as if it held the lease.
+            async Task<bool> ClearKeepingLeaseAsync()
+            {
+                using var stop     = new CancellationTokenSource();
+                using var clearing = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var held = true;
+
+                var renewal = Task.Run(async () =>
+                {
+                    while (true)
+                    {
+                        try { await Task.Delay(SyncRenewInterval, stop.Token); }
+                        catch (OperationCanceledException) { return; }
+
+                        // The writes run on ct, not on stop: a renewal that has started finishes and
+                        // records its expiry, so expiresAt never disagrees with what is stored.
+                        try
+                        {
+                            if (await mirror.GetStateAsync(LeaseKey, ct) != ExpiresValue(expiresAt))
+                            {
+                                held = false;
+                                await clearing.CancelAsync();
+                                return;
+                            }
+                            var next = DateTimeOffset.UtcNow + SyncTtl;
+                            await mirror.SetStateAsync(LeaseKey, ExpiresValue(next), ct);
+                            expiresAt = next;
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // A renewal that cannot be written may let the lease lapse, so it is not held.
+                            _logger?.LogWarning(ex, "SharePoint mirror for '{Site}': could not renew the sync lease during the clear.", site);
+                            held = false;
+                            await clearing.CancelAsync();
+                            return;
+                        }
+                    }
+                }, CancellationToken.None);
+
+                try { await mirror.ClearAsync(clearing.Token); }
+                catch (Exception) when (!held && !ct.IsCancellationRequested)
+                {
+                    // Stopped because the lease went elsewhere. Catalogs differ in what a cancelled
+                    // delete throws, so anything is accepted here - the lease loss is the story.
+                }
+                finally
+                {
+                    await stop.CancelAsync();
+                    await renewal;
+                }
+
+                if (!held) return false;
+
+                // Fresh expiry for the first page, and one last check that nothing took the lease between
+                // the final renewal and now.
+                if (await mirror.GetStateAsync(LeaseKey, ct) != ExpiresValue(expiresAt)) return false;
+                expiresAt = DateTimeOffset.UtcNow + SyncTtl;
+                await mirror.SetStateAsync(LeaseKey, ExpiresValue(expiresAt), ct);
+                return true;
             }
 
             // Another instance holds the lease: wait for it to finish (cleared) or die (expired).
