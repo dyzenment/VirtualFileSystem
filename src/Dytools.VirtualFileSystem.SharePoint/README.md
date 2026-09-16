@@ -131,8 +131,8 @@ The first listing seeds the whole mirror (one full delta); after that each listi
 changes since last time. The seed streams the delta **page by page**: each page is applied with one
 bulk write and its cursor checkpointed before the next page is fetched — so progress is durable (a
 crash resumes from the last page instead of restarting), and with debug logging on you get a
-per-page heartbeat (`SharePoint delta for '…': page N, M change(s) applied so far`) rather than a
-silent wait. The cursor lives in the catalog, so the mirror stays incremental across restarts. For
+per-page heartbeat (`SharePoint delta for '…': page N, R item(s) received, A applied, D dropped so
+far`) rather than a silent wait. The cursor lives in the catalog, so the mirror stays incremental across restarts. For
 libraries with hundreds of thousands of items a **database-backed** `IVfsCatalog` scales better
 (per-page writes on the JSON catalog rewrite the whole document each time). Select a keyed catalog
 or isolate several mounts within one shared catalog using
@@ -152,6 +152,31 @@ Graph reports as an upsert at the new path while never mentioning the old one. B
 the id, so one item is always one row - folders included, which is how deleting a folder takes its
 whole subtree with it. Because the tombstone has no path, a rooted mount cannot filter drive-wide
 deletions before looking them up; an id it holds nothing for is simply a no-op.
+
+### Items the mirror cannot place
+
+An item Graph reports without enough to place it - an upsert with no parent path or no name, a
+deletion with no id - never reaches the catalog. Each page that turns one away logs a **warning**
+with the count per reason and up to ten sample item ids. Items outside a rooted mount's prefix are
+expected (the feed is drive-wide) and are only counted in the debug heartbeat.
+
+### Rebuilding the mirror
+
+A mirror can drift from the drive in ways the incremental sync cannot repair: rows written before
+an item id was recorded, or changes that were dropped before anyone noticed. The cursor is already
+past those changes, so no later delta will mention them. `RefreshAsync` rebuilds from scratch -
+it drops the cursor, clears the catalog, and re-reads the drive with a fresh delta:
+
+```csharp
+await vfs.GetNodeCapability<IRefreshableCache>("/team")!.RefreshAsync();
+```
+
+The rebuild holds the same cross-instance lease as the incremental sync, and a listing waits for
+that lease, so no instance serves the half-filled catalog. A rebuild cut short leaves a marker
+behind: the next sync on any instance resumes it from the last saved page, and until one finishes,
+listings throw `VfsTransientException` instead of serving a catalog with entries missing.
+`RefreshAsync` itself throws `VfsTransientException` when it could not finish in one pass or could
+not get the lease.
 
 ## Delta change feed
 

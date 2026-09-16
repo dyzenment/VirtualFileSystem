@@ -72,8 +72,9 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     /// Advanced / test seam: a Graph client whose base address is the Graph v1.0 endpoint and that
     /// already attaches auth, targeting a drive by id.
     /// </summary>
-    public SharePointNode(HttpClient graphClient, string driveId, string? rootPath = null, NodeCatalog? mirror = null)
-        : this(graphClient, new SharePointOptions { DriveId = driveId, RootPath = rootPath }, mirror, null) { }
+    public SharePointNode(
+        HttpClient graphClient, string driveId, string? rootPath = null, NodeCatalog? mirror = null, ILogger? logger = null)
+        : this(graphClient, new SharePointOptions { DriveId = driveId, RootPath = rootPath }, mirror, logger) { }
 
     /// <summary>Advanced / test seam: resolve the drive from a site address + library name.</summary>
     public static SharePointNode ForSite(
@@ -537,10 +538,12 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
 
         var changes   = new List<SharePointChange>();
         var newCursor = cursor ?? "";
+        var pages     = 0;
         await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
         {
             changes.AddRange(page.Changes);
             if (page.IsComplete && page.Continuation is not null) newCursor = page.Continuation;
+            WarnIfUnplaced(page.Drops, ++pages);
         }
         return new SharePointChangeBatch(changes, newCursor);
     }
@@ -551,7 +554,11 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     // (the cursor for the next incremental sync). Streaming (rather than collecting everything first)
     // lets the seeder apply, checkpoint, and report progress page by page - a large first delta isn't a
     // silent wait, and a crash resumes from the last saved Continuation instead of restarting.
-    private async IAsyncEnumerable<(IReadOnlyList<SharePointChange> Changes, string? Continuation, bool IsComplete)>
+    //
+    // Received and Drops travel with each page because ToChange turns items away silently otherwise: a
+    // page whose every item was dropped reads exactly like a quiet one, and "0 changes applied" on a busy
+    // drive was indistinguishable from nothing having happened.
+    private async IAsyncEnumerable<(IReadOnlyList<SharePointChange> Changes, string? Continuation, bool IsComplete, int Received, DeltaDrops Drops)>
         EnumerateDeltaPagesAsync(string? startLink, [EnumeratorCancellation] CancellationToken ct)
     {
         var next = startLink ?? $"drives/{_driveId}/root/delta";
@@ -568,30 +575,36 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
             }
 
             var changes = new List<SharePointChange>();
+            var drops   = new DeltaDrops();
             if (page?.Value is not null)
                 foreach (var item in page.Value)
-                    if (ToChange(item) is { } change) changes.Add(change);
+                    if (ToChange(item, out var drop) is { } change) changes.Add(change);
+                    else drops.Add(drop, item);
 
-            if (page?.NextLink is not null) { yield return (changes, page.NextLink, false); next = page.NextLink; }
-            else                           { yield return (changes, page?.DeltaLink, true); next = null; }
+            var received = page?.Value?.Count ?? 0;
+            if (page?.NextLink is not null) { yield return (changes, page.NextLink, false, received, drops); next = page.NextLink; }
+            else                           { yield return (changes, page?.DeltaLink, true, received, drops); next = null; }
         }
     }
 
-    private SharePointChange? ToChange(DriveItem item)
+    private SharePointChange? ToChange(DriveItem item, out DeltaDrop drop)
     {
-        if (item.Root is not null) return null;                        // the drive root itself
+        drop = DeltaDrop.None;
+        if (item.Root is not null) { drop = DeltaDrop.Root; return null; }   // the drive root itself
 
         // Deletions are tested BEFORE anything path-derived. A tombstone is a minimal object - an id
         // and the deleted facet - so it carries no name and its parentReference has no path. Requiring
         // either first is how every deletion used to be discarded, leaving the mirror append-only.
         if (item.Deleted is not null)
-            return item.Id is null
-                ? null                                                 // nothing to match it on
-                : new SharePointChange(MountRelPath(item), SharePointChangeType.Deleted, null, item.Id);
+        {
+            if (item.Id is null) { drop = DeltaDrop.TombstoneWithoutId; return null; }   // nothing to match it on
+            return new SharePointChange(MountRelPath(item), SharePointChangeType.Deleted, null, item.Id);
+        }
 
         // Upserts carry full metadata, and a path is what an upsert is keyed on.
-        if (item.Name is null) return null;
-        if (MountRelPath(item) is not { } mountRel) return null;       // outside this mount's root
+        if (item.Name is null) { drop = DeltaDrop.NoName; return null; }
+        if (ParentRelPath(item.ParentReference?.Path) is null) { drop = DeltaDrop.NoParentPath; return null; }
+        if (MountRelPath(item) is not { } mountRel) { drop = DeltaDrop.OutsideRoot; return null; }
 
         return new SharePointChange(
             mountRel, SharePointChangeType.Updated, ToNodeInfo(item, VfsPath.From(mountRel)), item.Id);
@@ -605,6 +618,58 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
         if (ParentRelPath(item.ParentReference?.Path) is not { } parentRel) return null;
 
         return StripRoot(parentRel.Length == 0 ? item.Name : $"{parentRel}/{item.Name}");
+    }
+
+    // Why ToChange turned an item away.
+    private enum DeltaDrop { None, Root, OutsideRoot, TombstoneWithoutId, NoName, NoParentPath }
+
+    // What one delta page (or a whole sync) turned away. The root arrives on every page and is not
+    // worth counting. OutsideRoot is the mount working as intended - the feed is drive-wide - so it is
+    // counted but not warned about. The other three are items that changed in SharePoint and never
+    // reached the catalog, which is how the mirror goes stale without anything saying so.
+    private sealed class DeltaDrops
+    {
+        private const int MaxSamples = 10;
+
+        public int OutsideRoot, TombstoneWithoutId, NoName, NoParentPath;
+        public List<string> SampleIds { get; } = [];
+
+        public int Unplaced => TombstoneWithoutId + NoName + NoParentPath;
+        public int Total    => OutsideRoot + Unplaced;
+
+        public void Add(DeltaDrop reason, DriveItem item)
+        {
+            switch (reason)
+            {
+                case DeltaDrop.OutsideRoot:        OutsideRoot++;        return;
+                case DeltaDrop.TombstoneWithoutId: TombstoneWithoutId++; break;
+                case DeltaDrop.NoName:             NoName++;             break;
+                case DeltaDrop.NoParentPath:       NoParentPath++;       break;
+                default:                                                 return;
+            }
+            if (SampleIds.Count < MaxSamples) SampleIds.Add(item.Id ?? "(no id)");
+        }
+
+        public void AddTo(DeltaDrops total)
+        {
+            total.OutsideRoot        += OutsideRoot;
+            total.TombstoneWithoutId += TombstoneWithoutId;
+            total.NoName             += NoName;
+            total.NoParentPath       += NoParentPath;
+            foreach (var id in SampleIds)
+                if (total.SampleIds.Count < MaxSamples) total.SampleIds.Add(id);
+        }
+    }
+
+    private void WarnIfUnplaced(DeltaDrops drops, int page)
+    {
+        if (drops.Unplaced == 0) return;
+        _logger?.LogWarning(
+            "SharePoint delta for '{Site}': page {Page} dropped {Count} item(s) the mirror could not place "
+            + "(no parent path: {NoParentPath}, no name: {NoName}, deletion without id: {NoId}). "
+            + "These changes are not in the catalog. Sample item ids: {SampleIds}.",
+            _sitePath ?? _driveId, page, drops.Unplaced, drops.NoParentPath, drops.NoName,
+            drops.TombstoneWithoutId, string.Join(", ", drops.SampleIds));
     }
 
     // -- Content hashes --------------------------------------------------------
@@ -660,10 +725,50 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     // -- Catalog mirror sync ---------------------------------------------------
 
     /// <summary>
-    /// Force a delta sync of the mirror (<c>IRefreshableCache</c>). Listing already syncs, so this is for
-    /// callers that want an explicit refresh without listing.
+    /// Rebuild the mirror from scratch (<c>IRefreshableCache</c>): drop the delta cursor, clear the
+    /// catalog, and re-read the whole drive with a fresh delta. This is the answer to a catalog that
+    /// has drifted from SharePoint - rows for items moved or deleted in the browser whose changes never
+    /// reached it - which the incremental sync every listing runs cannot repair, because the changes
+    /// that would have fixed those rows are behind the cursor.
+    /// <para>
+    /// The rebuild runs under the same lease as the incremental sync, and a listing waits for that
+    /// lease before serving, so no instance lists from the half-filled catalog. If the rebuild is cut
+    /// short it leaves a marker behind: the next sync, on any instance, resumes it from the last saved
+    /// page, and until one finishes, listings throw <see cref="VfsTransientException"/> rather than
+    /// serve a catalog that is missing entries.
+    /// </para>
     /// </summary>
-    public Task RefreshAsync(CancellationToken ct = default) => _mirror is null ? Task.CompletedTask : SyncAsync(ct);
+    /// <exception cref="VfsTransientException">
+    /// The rebuild did not finish in this call (it resumes on the next sync), or another instance held
+    /// the sync lease for every attempt.
+    /// </exception>
+    public async Task RefreshAsync(CancellationToken ct = default)
+    {
+        if (_mirror is null) return;
+
+        SyncOutcome outcome;
+        try
+        {
+            await EnsureDriveIdAsync(ct);
+            outcome = await RunSyncAsync(rebuild: true, ct);
+        }
+        catch (Exception ex) when (VfsFailure.ShouldWrap(ex, ct))
+        {
+            // Reached as a node capability, outside the pipeline, so there is no request to name.
+            throw GraphErrors.Transport(ex, VfsOperation.Sync, null, null, ct);
+        }
+
+        switch (outcome)
+        {
+            case SyncOutcome.Overran:
+                throw new VfsTransientException(VfsFailureReason.Timeout, VfsOperation.Sync,
+                    message: "The SharePoint mirror rebuild did not finish in one pass. It resumes on the next sync; "
+                             + "listings fail until it completes.");
+            case SyncOutcome.Exhausted:
+                throw new VfsTransientException(VfsFailureReason.Unavailable, VfsOperation.Sync,
+                    message: "The SharePoint mirror rebuild could not start: another instance held the sync lease.");
+        }
+    }
 
     // Cross-instance sync gate (sizing is deliberately generous; re-up per page means the TTL only has
     // to cover ONE delta page, not the whole delta).
@@ -677,23 +782,76 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
     private static bool    PastGrace(string v, TimeSpan grace)
         => !long.TryParse(v, out var ms) || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= ms + (long)grace.TotalMilliseconds;
 
-    // Incremental delta from the stored cursor, applied one page at a time (bulk upsert/remove = one
-    // document write per page), checkpointing the cursor each page so a crash/abort resumes from there.
+    // Sync-state keys. "rebuilding" is present from the moment a rebuild clears the catalog until a
+    // delta runs to completion after it - the catalog is incomplete for exactly that long.
+    private const string CursorKey     = "cursor";
+    private const string LeaseKey      = "sync-expires";
+    private const string RebuildingKey = "rebuilding";
+
+    private enum SyncOutcome { Completed, Overran, PeerFinished, Exhausted }
+
+    // The listing path: bring the mirror up to date, then refuse to serve it if a rebuild is still
+    // outstanding. Throwing transient here is what keeps a caller that compares listings against
+    // something else - a folder sync - from reading a half-filled catalog as mass deletion.
+    private async Task SyncAsync(CancellationToken ct)
+    {
+        await RunSyncAsync(rebuild: false, ct);
+
+        if (await _mirror!.GetStateAsync(RebuildingKey, ct) is not null)
+            throw new VfsTransientException(VfsFailureReason.Unavailable, VfsOperation.Sync,
+                message: "The SharePoint mirror is being rebuilt and is incomplete until the rebuild finishes.");
+    }
+
+    // Delta from the stored cursor, applied one page at a time (bulk upsert/remove = one document write
+    // per page), checkpointing the cursor each page so a crash/abort resumes from there. With
+    // rebuild=true the cursor and catalog are cleared first, so the delta is a full re-read of the drive.
+    //
     // A datetime lease in `sync-expires` gates it across instances: acquire atomically (SetIfNull), re-up
     // the expiry each page, and abort just before the expiry if a page overruns; on success clear the
     // lease so waiters serve at once. A loser waits for the holder to finish (cleared) or die (expired),
-    // taking over in that case - bounded by SyncMaxAttempts, then it just serves what's mirrored.
-    private async Task SyncAsync(CancellationToken ct)
+    // taking over in the second case. An incremental sync is satisfied by a peer that finished; a rebuild
+    // is not, and goes back round to take the lease itself - bounded by SyncMaxAttempts either way.
+    private async Task<SyncOutcome> RunSyncAsync(bool rebuild, CancellationToken ct)
     {
         var mirror = _mirror!;
+        var site   = _sitePath ?? _driveId;
+
         for (var attempt = 0; attempt < SyncMaxAttempts; attempt++)
         {
             var expiresAt = DateTimeOffset.UtcNow + SyncTtl;
-            if (await mirror.SetIfNullStateAsync("sync-expires", ExpiresValue(expiresAt), ct))
+            if (await mirror.SetIfNullStateAsync(LeaseKey, ExpiresValue(expiresAt), ct))
             {
-                var cursor = await mirror.GetStateAsync("cursor", ct);
-                var site   = _sitePath ?? _driveId;
-                int applied = 0, pages = 0;
+                try { return await SyncHoldingLeaseAsync(); }
+                catch
+                {
+                    // A failed page ends this sync for certain, so hand the lease back now rather than
+                    // make every waiter sit out its expiry - but only if it is still ours to hand back.
+                    if (await mirror.GetStateAsync(LeaseKey, CancellationToken.None) == ExpiresValue(expiresAt))
+                        await mirror.ClearStateAsync(LeaseKey, CancellationToken.None);
+                    throw;
+                }
+            }
+
+            // Runs with the lease held. A local function so it renews the loop's expiresAt in place,
+            // which is the value the catch above compares against.
+            async Task<SyncOutcome> SyncHoldingLeaseAsync()
+            {
+                if (rebuild)
+                {
+                    // Marker first: if anything below is interrupted, the next sync must know the
+                    // catalog is not whole.
+                    await mirror.SetStateAsync(RebuildingKey, "1", ct);
+                    await mirror.ClearStateAsync(CursorKey, ct);
+                    await mirror.ClearAsync(ct);
+                    _logger?.LogWarning("SharePoint mirror for '{Site}': rebuilding - catalog cleared, re-reading the drive.", site);
+                }
+
+                // A rebuild interrupted earlier (here or on another instance) is finished by this pass:
+                // its cursor is the last page it saved.
+                var finishing = rebuild || await mirror.GetStateAsync(RebuildingKey, ct) is not null;
+                var cursor    = await mirror.GetStateAsync(CursorKey, ct);
+                int received = 0, applied = 0, pages = 0;
+                var dropped  = new DeltaDrops();
 
                 await foreach (var page in EnumerateDeltaPagesAsync(cursor, ct))
                 {
@@ -710,32 +868,57 @@ public sealed class SharePointNode : VfsNodeBase, ISharePointChangeFeed, IRefres
                         await RemoveStaleAliasesAsync(mirror, upserts, ct);
                         await mirror.UpsertAsync(upserts, ct);
                     }
-                    if (page.Continuation is not null) await mirror.SetStateAsync("cursor", page.Continuation, ct);
+                    if (page.Continuation is not null) await mirror.SetStateAsync(CursorKey, page.Continuation, ct);
 
-                    applied += page.Changes.Count;
+                    received += page.Received;
+                    applied  += page.Changes.Count;
+                    page.Drops.AddTo(dropped);
                     pages++;
-                    _logger?.LogDebug("SharePoint delta for '{Site}': page {Page}, {Applied} change(s) applied so far{Done}.",
-                        site, pages, applied, page.IsComplete ? " (complete)" : "");
+                    _logger?.LogDebug(
+                        "SharePoint delta for '{Site}': page {Page}, {Received} item(s) received, {Applied} applied, "
+                        + "{Dropped} dropped so far{Done}.",
+                        site, pages, received, applied, dropped.Total, page.IsComplete ? " (complete)" : "");
+                    WarnIfUnplaced(page.Drops, pages);
 
-                    if (DateTimeOffset.UtcNow >= expiresAt - SyncAbortMargin) return;   // overran → abort, let the lease lapse
+                    if (DateTimeOffset.UtcNow >= expiresAt - SyncAbortMargin)   // overran → abort, let the lease lapse
+                    {
+                        if (finishing)
+                            _logger?.LogWarning(
+                                "SharePoint mirror for '{Site}': rebuild paused after {Pages} page(s); it resumes on the next sync.",
+                                site, pages);
+                        return SyncOutcome.Overran;
+                    }
                     expiresAt = DateTimeOffset.UtcNow + SyncTtl;
-                    await mirror.SetStateAsync("sync-expires", ExpiresValue(expiresAt), ct);   // re-up
+                    await mirror.SetStateAsync(LeaseKey, ExpiresValue(expiresAt), ct);   // re-up
                 }
 
-                await mirror.ClearStateAsync("sync-expires", CancellationToken.None);   // done → waiters serve at once
-                return;
+                if (finishing)
+                {
+                    await mirror.ClearStateAsync(RebuildingKey, ct);
+                    _logger?.LogWarning(
+                        "SharePoint mirror for '{Site}': rebuild complete - {Applied} item(s) applied from {Received} received "
+                        + "({Unplaced} could not be placed, {OutsideRoot} outside the mount root).",
+                        site, applied, received, dropped.Unplaced, dropped.OutsideRoot);
+                }
+
+                await mirror.ClearStateAsync(LeaseKey, CancellationToken.None);   // done → waiters serve at once
+                return SyncOutcome.Completed;
             }
 
             // Another instance holds the lease: wait for it to finish (cleared) or die (expired).
             while (true)
             {
                 await Task.Delay(SyncPollInterval, ct);
-                var v = await mirror.GetStateAsync("sync-expires", ct);
-                if (v is null) return;                                                   // finished → serve current mirror
-                if (PastGrace(v, SyncTakeoverGrace)) { await mirror.ClearStateAsync("sync-expires", ct); break; }   // died → take over
+                var v = await mirror.GetStateAsync(LeaseKey, ct);
+                if (v is null)
+                {
+                    if (!rebuild) return SyncOutcome.PeerFinished;                         // finished → serve current mirror
+                    break;                                                                 // a peer's sync is not our rebuild → take the lease
+                }
+                if (PastGrace(v, SyncTakeoverGrace)) { await mirror.ClearStateAsync(LeaseKey, ct); break; }   // died → take over
             }
         }
-        // exhausted attempts → serve whatever is mirrored
+        return SyncOutcome.Exhausted;   // incremental: serve whatever is mirrored; rebuild: the caller reports it
     }
 
     // Removes mirrored entries by driveItem id. The id rides in CatalogEntry.ContentId (see

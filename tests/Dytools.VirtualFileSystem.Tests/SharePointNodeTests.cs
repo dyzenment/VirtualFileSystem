@@ -3,6 +3,7 @@ using System.Text;
 using Dytools.VirtualFileSystem.Catalog;
 using Dytools.VirtualFileSystem.Nodes.InMemory;
 using Dytools.VirtualFileSystem.Nodes.SharePoint;
+using Microsoft.Extensions.Logging;
 
 namespace Dytools.VirtualFileSystem.Tests;
 
@@ -167,7 +168,7 @@ public sealed class SharePointNodeTests
 
         // The terminal deltaLink was checkpointed, so a later sync resumes from it (not a fresh delta).
         var before = handler.Requests.Count;
-        await node.RefreshAsync();
+        await foreach (var _ in node.ListAsync(Req(""), VfsListOptions.Default)) { }
         Assert.Contains("token=DONE", handler.Requests[before]);
     }
 
@@ -597,6 +598,178 @@ public sealed class SharePointNodeTests
     }
 
     // -- Stub transport --------------------------------------------------------
+
+    // -- Dropped changes -------------------------------------------------------
+
+    [Fact]
+    public async Task Delta_ItemsTheMirrorCannotPlace_AreWarnedWithReasonsAndIds()
+    {
+        const string delta = """
+            {"value":[
+              {"root":{},"name":"root"},
+              {"id":"01OK","name":"ok.txt","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/docs"}},
+              {"id":"01NOPATH","name":"moved.txt","size":1,"file":{},"parentReference":{"id":"01PARENT"}},
+              {"id":"01NONAME","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/docs"}},
+              {"deleted":{"state":"deleted"}}
+            ],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=C1"}
+            """;
+        var logger = new ListLogger();
+        var node   = MirroredNode(new StubHandler(_ => (HttpStatusCode.OK, delta)), out _, logger);
+
+        await foreach (var _ in node.ListAsync(Req(""), VfsListOptions.Default)) { }
+
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Contains("dropped 3 item(s)", warning.Message);
+        Assert.Contains("no parent path: 1", warning.Message);
+        Assert.Contains("no name: 1", warning.Message);
+        Assert.Contains("deletion without id: 1", warning.Message);
+        Assert.Contains("01NOPATH", warning.Message);
+        Assert.Contains("01NONAME", warning.Message);
+
+        // The page summary counts what arrived as well as what survived, root included in received.
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Debug
+            && e.Message.Contains("5 item(s) received, 1 applied, 3 dropped"));
+    }
+
+    [Fact]
+    public async Task Delta_ItemsOutsideTheMountRoot_AreCountedButNotWarned()
+    {
+        const string delta = """
+            {"value":[
+              {"id":"01IN","name":"in.txt","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/Shared"}},
+              {"id":"01OUT","name":"out.txt","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/Other"}}
+            ],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=C1"}
+            """;
+        var logger = new ListLogger();
+        var node   = MirroredNode(new StubHandler(_ => (HttpStatusCode.OK, delta)), out _, logger, rootPath: "Shared");
+
+        await foreach (var _ in node.ListAsync(Req(""), VfsListOptions.Default)) { }
+
+        Assert.DoesNotContain(logger.Entries, e => e.Level >= LogLevel.Warning);
+        Assert.Contains(logger.Entries, e => e.Message.Contains("2 item(s) received, 1 applied, 1 dropped"));
+    }
+
+    // -- Rebuild (IRefreshableCache) -------------------------------------------
+
+    [Fact]
+    public async Task Refresh_ClearsRowsTheDriveNoLongerHas_AndReseedsFromAFreshDelta()
+    {
+        // First sync mirrors a file that is later moved in the browser. The incremental feed never says
+        // so (the drift this is for), so only a rebuild gets rid of it.
+        const string seed = """
+            {"value":[
+              {"id":"01GHOST","name":"ghost.xml","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/Inbound"}},
+              {"id":"01KEEP","name":"keep.xml","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/Inbound"}}
+            ],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=OLD"}
+            """;
+        const string full = """
+            {"value":[
+              {"id":"01KEEP","name":"keep.xml","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:/Inbound"}}
+            ],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=NEW"}
+            """;
+
+        var seeded  = false;
+        var handler = new StubHandler(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            // Nothing new since whichever cursor was asked for: hand the same cursor back.
+            if (url.Contains("token="))
+                return (HttpStatusCode.OK, $$"""{"value":[],"@odata.deltaLink":"{{url}}"}""");
+            if (!seeded) { seeded = true; return (HttpStatusCode.OK, seed); }
+            return (HttpStatusCode.OK, full);
+        });
+        var logger = new ListLogger();
+        var node   = MirroredNode(handler, out var mirror, logger);
+
+        Assert.Contains("Inbound/ghost.xml", await ListRecursive(node));
+
+        var before = handler.Requests.Count;
+        await node.RefreshAsync();
+
+        Assert.DoesNotContain("token=", handler.Requests[before]);   // the stored cursor was dropped
+        Assert.Equal(new[] { "Inbound", "Inbound/keep.xml" }, (await ListRecursive(node)).Order());
+        Assert.EndsWith("token=NEW", await mirror.GetStateAsync("cursor"));
+        Assert.Null(await mirror.GetStateAsync("rebuilding"));
+        Assert.Null(await mirror.GetStateAsync("sync-expires"));
+        Assert.Contains(logger.Entries, e => e.Message.Contains("rebuild complete"));
+    }
+
+    [Fact]
+    public async Task Refresh_InterruptedMidDelta_ResumesFromTheLastSavedPageOnTheNextListing()
+    {
+        const string page1 = """
+            {"value":[{"id":"01A","name":"a.txt","size":1,"file":{},"parentReference":{"path":"/drives/drive1/root:"}}],
+            "@odata.nextLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=P2"}
+            """;
+        const string page2 = """
+            {"value":[{"id":"01B","name":"b.txt","size":2,"file":{},"parentReference":{"path":"/drives/drive1/root:"}}],
+            "@odata.deltaLink":"https://graph.microsoft.com/v1.0/drives/drive1/root/delta?token=DONE"}
+            """;
+
+        var failPage2 = true;
+        var handler   = new StubHandler(req =>
+        {
+            var url = req.RequestUri!.ToString();
+            if (!url.Contains("token=P2")) return (HttpStatusCode.OK, page1);
+            return failPage2 ? (HttpStatusCode.ServiceUnavailable, null) : (HttpStatusCode.OK, page2);
+        });
+        var node = MirroredNode(handler, out var mirror);
+
+        await Assert.ThrowsAnyAsync<VfsException>(() => node.RefreshAsync());
+
+        // Cut short after page 1: the catalog is marked incomplete, the cursor is page 2, and the lease
+        // was handed back rather than left to expire.
+        Assert.NotNull(await mirror.GetStateAsync("rebuilding"));
+        Assert.EndsWith("token=P2", await mirror.GetStateAsync("cursor"));
+        Assert.Null(await mirror.GetStateAsync("sync-expires"));
+
+        failPage2 = false;
+        var listed = await ListRecursive(node);
+
+        Assert.Equal(new[] { "a.txt", "b.txt" }, listed.Order());
+        Assert.Contains("token=P2", handler.Requests[^1]);            // resumed, not restarted
+        Assert.Null(await mirror.GetStateAsync("rebuilding"));
+        Assert.EndsWith("token=DONE", await mirror.GetStateAsync("cursor"));
+    }
+
+    [Fact]
+    public async Task Refresh_WithoutAMirror_IsANoOp()
+    {
+        var handler = new StubHandler(_ => (HttpStatusCode.OK, "{}"));
+        await Node(handler).RefreshAsync();
+        Assert.Empty(handler.Requests);
+    }
+
+    private static SharePointNode MirroredNode(
+        StubHandler handler, out NodeCatalog mirror, ILogger? logger = null, string? rootPath = null)
+    {
+        mirror = new NodeCatalog(new JsonFileVfsCatalog(new InMemoryKvNode()));
+        return new SharePointNode(
+            new HttpClient(handler) { BaseAddress = new Uri(GraphHttp_BaseAddress) }, "drive1", rootPath, mirror, logger);
+    }
+
+    private static async Task<List<string>> ListRecursive(SharePointNode node)
+    {
+        var paths = new List<string>();
+        await foreach (var i in node.ListAsync(Req(""), new VfsListOptions { Recurse = true }))
+            paths.Add(i.RelativePath.ToString());
+        return paths;
+    }
+
+    private sealed class ListLogger : ILogger
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
+    }
 
     private sealed class StubHandler(Func<HttpRequestMessage, (HttpStatusCode Code, string? Body)> responder)
         : HttpMessageHandler

@@ -8,7 +8,8 @@ namespace Dytools.VirtualFileSystem;
 /// to know a catalog is involved, and a node that later caches some other way still refreshes.
 /// </para>
 /// <para>
-/// Nodes that keep the cache current incrementally (SharePoint's delta feed) rarely need this. Nodes
+/// Nodes that keep the cache current incrementally (SharePoint's delta feed) need this only to
+/// repair a cache that has drifted, and treat it as a full rebuild. Nodes
 /// that write through and cannot see outside changes cheaply (S3, and Azure by default) expose it so
 /// you can re-sync deliberately - on a schedule, or once you know something changed outside this VFS.
 /// </para>

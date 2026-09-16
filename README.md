@@ -531,7 +531,7 @@ this library. All three support an optional **caching catalog** (each via its ow
 `UseS3CachingCatalog` / `UseAzureCachingCatalog` / `UseSharePointCachingCatalog`) that
 mirrors the backend's structure into an `IVfsCatalog` for fast local listings, refreshable via
 the `IRefreshableCache` capability - SharePoint keeps it fresh with its `ISharePointChangeFeed`
-delta, while S3/Azure seed once and write through. SharePoint's mirror keys each row on the
+delta (and `RefreshAsync` rebuilds it from scratch), while S3/Azure seed once and write through. SharePoint's mirror keys each row on the
 driveItem id (in `ContentId`) rather than on its path, because that is all a deletion reports and it
 is what survives a rename - so a caching SharePoint mount needs an `IContentAddressedCatalog`. See
 each package's README for setup.
