@@ -88,6 +88,40 @@ public interface IVfsCatalog : INodeCapability
     }
 
     /// <summary>
+    /// Remove every entry except the subtrees rooted at <paramref name="keep"/> - a whole-catalog wipe that
+    /// spares reserved state. The default walks down from the root and removes whatever holds nothing
+    /// worth keeping, in one bulk <see cref="RemoveAsync(IEnumerable{VfsPath}, CancellationToken)"/>.
+    /// A catalog that can drop everything in one statement (a database scoped to a partition) should
+    /// override this: the default has to name each top-level entry, and a store that honours that by
+    /// loading each subtree is exactly the slow path a wipe should not take.
+    /// </summary>
+    /// <param name="keep">Paths whose entries and subtrees survive, along with their ancestors. The root is ignored.</param>
+    /// <param name="ct">A token to cancel the wipe.</param>
+    async ValueTask ClearAsync(IReadOnlyCollection<VfsPath> keep, CancellationToken ct = default)
+    {
+        var kept    = keep.Select(p => p.ToString()).Where(k => k.Length > 0).ToList();
+        var doomed  = new List<VfsPath>();
+        var pending = new Stack<VfsPath>();
+        pending.Push(VfsPath.From(""));
+
+        while (pending.Count > 0)
+        {
+            await foreach (var e in ListChildrenAsync(pending.Pop(), ct))
+            {
+                var path = e.Path.ToString();
+                if (kept.Any(k => path == k || path.StartsWith(k + "/", StringComparison.Ordinal)))
+                    continue;                                   // kept, or inside something kept
+                if (kept.Any(k => k.StartsWith(path + "/", StringComparison.Ordinal)))
+                    pending.Push(e.Path);                       // holds something kept: go inside instead
+                else
+                    doomed.Add(e.Path);
+            }
+        }
+
+        if (doomed.Count > 0) await RemoveAsync(doomed, ct);
+    }
+
+    /// <summary>
     /// Best-effort: record that <paramref name="path"/> was read at <paramref name="accessedAt"/>, updating its <c>AccessedAt</c>. Approximate
     /// by design - it only sees reads that go through the VFS, not external access - so it's meant for
     /// "recently used", not audit. The default is a no-op, so catalogs that don't track access, or

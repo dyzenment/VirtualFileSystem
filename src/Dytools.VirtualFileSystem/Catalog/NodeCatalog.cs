@@ -201,16 +201,13 @@ public sealed class NodeCatalog
 
     /// <summary>
     /// Wipe every mirrored entry (keeping the reserved state directory) - used before a full re-list.
-    /// One bulk remove so a populated mirror isn't re-persisted per root.
+    /// Handed to the catalog as one wipe, so a catalog that can clear its whole partition in a statement
+    /// does, rather than being asked to remove each top-level folder by name.
     /// </summary>
-    public async Task ClearAsync(CancellationToken ct = default)
-    {
-        var roots = new List<VfsPath>();
-        await foreach (var e in _catalog.ListChildrenAsync(VfsPath.From(""), ct))
-            if (!IsStatePath(e.Path))
-                roots.Add(e.Path);
-        await _catalog.RemoveAsync(roots, ct);
-    }
+    public Task ClearAsync(CancellationToken ct = default)
+        => _catalog.ClearAsync(StateDirPaths, ct).AsTask();
+
+    private static readonly IReadOnlyCollection<VfsPath> StateDirPaths = [VfsPath.From(StateDir)];
 
     // -- Conversions -----------------------------------------------------------
 

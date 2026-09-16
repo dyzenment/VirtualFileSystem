@@ -172,6 +172,60 @@ public sealed class CatalogMirrorTests
     }
 
     [Fact]
+    public async Task CatalogClear_Default_KeepsNestedSubtreeAndItsAncestors_RemovesTheRest()
+    {
+        IVfsCatalog catalog = new JsonFileVfsCatalog(new InMemoryKvNode());
+        foreach (var path in new[] { "a/b/keep.txt", "a/c/gone.txt", "a/gone.txt", "d/gone.txt", "top.txt" })
+            await catalog.PutEntryAsync(new CatalogEntry { Path = VfsPath.From(path), IsDirectory = false });
+
+        await catalog.ClearAsync([VfsPath.From("a/b"), VfsPath.From("")]);   // the root is ignored, not "keep everything"
+
+        var left = new List<string>();
+        var pending = new Stack<VfsPath>([VfsPath.From("")]);
+        while (pending.Count > 0)
+            await foreach (var e in catalog.ListChildrenAsync(pending.Pop()))
+            {
+                left.Add(e.Path.ToString());
+                if (e.IsDirectory) pending.Push(e.Path);
+            }
+
+        Assert.Equal(new[] { "a", "a/b", "a/b/keep.txt" }, left.Order());
+    }
+
+    [Fact]
+    public async Task NodeCatalogClear_HandsTheWholeWipeToTheCatalog_KeepingOnlyTheStateDirectory()
+    {
+        var catalog = new ClearRecordingCatalog();
+        var m = new NodeCatalog(catalog);
+
+        await m.ClearAsync();
+
+        var keep = Assert.Single(catalog.Clears);
+        Assert.Equal(".vfs-mirror-state", Assert.Single(keep).ToString());
+        Assert.Empty(catalog.BulkRemoves);   // not asked to remove top-level folders one by one
+    }
+
+    // Overrides the wipe, as a database-backed catalog would, and records what it was asked to do.
+    private sealed class ClearRecordingCatalog : IVfsCatalog
+    {
+        private readonly IVfsCatalog _inner = new JsonFileVfsCatalog(new InMemoryKvNode());
+        public List<IReadOnlyCollection<VfsPath>> Clears { get; } = new();
+        public List<IEnumerable<VfsPath>> BulkRemoves { get; } = new();
+
+        public ValueTask ClearAsync(IReadOnlyCollection<VfsPath> keep, CancellationToken ct = default)
+        { Clears.Add(keep); return ValueTask.CompletedTask; }
+        public ValueTask RemoveAsync(IEnumerable<VfsPath> paths, CancellationToken ct = default)
+        { BulkRemoves.Add(paths); return ValueTask.CompletedTask; }
+
+        public ValueTask<CatalogEntry?> GetAsync(VfsPath p, CancellationToken ct = default) => _inner.GetAsync(p, ct);
+        public IAsyncEnumerable<CatalogEntry> ListChildrenAsync(VfsPath p, CancellationToken ct = default) => _inner.ListChildrenAsync(p, ct);
+        public ValueTask<CatalogEntry?> PutEntryAsync(CatalogEntry e, CancellationToken ct = default) => _inner.PutEntryAsync(e, ct);
+        public ValueTask EnsureDirectoryAsync(VfsPath p, DateTimeOffset t, CancellationToken ct = default) => _inner.EnsureDirectoryAsync(p, t, ct);
+        public IAsyncEnumerable<CatalogEntry> RemoveAsync(VfsPath p, CancellationToken ct = default) => _inner.RemoveAsync(p, ct);
+        public ValueTask MoveAsync(VfsPath f, VfsPath t, CancellationToken ct = default) => _inner.MoveAsync(f, t, ct);
+    }
+
+    [Fact]
     public void ToNodeInfo_Maps_Fields()
     {
         var entry = new CatalogEntry
